@@ -211,7 +211,9 @@ def test_materialize_service_copies_local_source_and_renders_template(tmp_path) 
     assert payload["server"]["port"] == 1933
     assert payload["server"]["root_api_key"]
     assert payload["storage"]["workspace"] == "/app/data"
-    assert payload["runtime"]["profile"] == "alpha"
+    assert payload["storage"]["vectordb"] == {"name": "context", "backend": "local"}
+    assert payload["storage"]["agfs"] == {"backend": "local"}
+    assert "runtime" not in payload
     assert payload["embedding"]["dense"]["model"] == "text-embedding-3-small"
 
 

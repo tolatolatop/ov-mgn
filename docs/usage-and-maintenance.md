@@ -6,8 +6,8 @@
 - `server.json`：服务托管配置，例如镜像、端口、源码、网关和附加环境变量。
 - `model.json`：模型相关敏感配置，例如 embedding、VLM、bot agents。
 
-`ov-mgn` 会自动生成完整的 `/app/config/openviking.conf`，包括 `server`、`storage`、
-release-local `root_api_key` 和运行元信息。不要再维护整份 OpenViking 模板。
+`ov-mgn` 会自动生成完整的 `/app/config/openviking.conf`，包括 `server`、`storage`
+和 release-local `root_api_key`。不要再维护整份 OpenViking 模板。
 
 ## 1. 快速启动
 
@@ -312,7 +312,7 @@ uv run ov-mgn status
 - `services.<name>.route_path`：服务路径，默认 `/{service}/`。
 - `services.<name>.source`：源码来源，支持 `local` 或 `git`。
 - `services.<name>.openviking.env`：附加容器环境变量。
-- `services.<name>.openviking.vars`：写入运行元信息的变量，例如 `profile`。
+- `services.<name>.openviking.vars`：ov-mgn 渲染和分支管理变量，例如 `profile`。
 - `services.<name>.branch`：可选分支声明，只记录父服务和声明时间；目标服务第一次
   `up` 时会从父服务当时的 online release data 复制初始数据。
 

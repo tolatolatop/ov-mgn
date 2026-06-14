@@ -170,7 +170,7 @@ def test_candidate_promote_flow_e2e_without_real_docker(tmp_path) -> None:
     assert service.release_id in up.output
     assert (service.code_dir / "app.py").read_text(encoding="utf-8") == "VERSION = 'candidate'\n"
     rendered = json.loads(service.openviking.config_file.read_text(encoding="utf-8"))
-    assert rendered["runtime"]["profile"] == "alpha-e2e"
+    assert "runtime" not in rendered
     assert rendered["embedding"]["dense"]["api_key"] == "model-secret"
     assert load_state(state_path).services["alpha"].candidate_release_id == service.release_id
 

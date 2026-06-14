@@ -605,14 +605,8 @@ def _render_managed_openviking_config(service: LockedServiceSpec) -> None:
         },
         "storage": {
             "workspace": "/app/data",
-            "vectordb": {"provider": "local"},
-            "agfs": {"provider": "local"},
-        },
-        "runtime": {
-            "managed_by": "ov-mgn",
-            "service": service.openviking.vars.get("service"),
-            "profile": service.openviking.vars.get("profile"),
-            "release_id": service.release_id,
+            "vectordb": {"name": "context", "backend": "local"},
+            "agfs": {"backend": "local"},
         },
     }
     config.update(model_config)

@@ -1,3 +1,4 @@
+import json
 import stat
 from datetime import UTC, datetime
 
@@ -5,7 +6,6 @@ import pytest
 from pydantic import ValidationError
 
 from ov_mgn.server_config import (
-    DEFAULT_CONFIG_TEMPLATE,
     UserServerConfig,
     get_release_lock_path,
     get_server_config_path,
@@ -16,6 +16,7 @@ from ov_mgn.server_config import (
     materialize_service,
     render_locked_config,
     save_user_server_config,
+    validate_openviking_model_config,
     write_lock_file,
 )
 
@@ -183,19 +184,18 @@ def test_materialize_service_copies_local_source_and_renders_template(tmp_path) 
     source_dir = tmp_path / "source"
     source_dir.mkdir()
     (source_dir / "app.py").write_text("print('ready')\n", encoding="utf-8")
-    template = tmp_path / "template.conf"
-    template.write_text("profile=${profile}\nrelease=${release_id}\n", encoding="utf-8")
+    model_config = _write_model_config(tmp_path)
     config = UserServerConfig.model_validate(
         {
-            "defaults": {"data_root": str(tmp_path / "data")},
+            "defaults": {
+                "data_root": str(tmp_path / "data"),
+                "openviking": {"model_config_file": str(model_config)},
+            },
             "services": {
                 "alpha": {
                     "stable_port": 18080,
                     "source": {"type": "local", "path": str(source_dir)},
-                    "openviking": {
-                        "template_path": str(template),
-                        "vars": {"profile": "alpha"},
-                    },
+                    "openviking": {"vars": {"profile": "alpha"}},
                 }
             },
         }
@@ -205,27 +205,31 @@ def test_materialize_service_copies_local_source_and_renders_template(tmp_path) 
     materialize_service(service)
 
     assert (service.code_dir / "app.py").read_text(encoding="utf-8") == "print('ready')\n"
-    assert "profile=alpha" in service.openviking.config_file.read_text(encoding="utf-8")
-    assert DEFAULT_CONFIG_TEMPLATE.startswith("# Generated")
+    rendered = service.openviking.config_file.read_text(encoding="utf-8")
+    payload = json.loads(rendered)
+    assert payload["server"]["host"] == "0.0.0.0"
+    assert payload["server"]["port"] == 1933
+    assert payload["server"]["root_api_key"]
+    assert payload["storage"]["workspace"] == "/app/data"
+    assert payload["runtime"]["profile"] == "alpha"
+    assert payload["embedding"]["dense"]["model"] == "text-embedding-3-small"
 
 
 def test_materialize_service_renders_ovcli_config_from_root_api_key(tmp_path) -> None:
     source_dir = tmp_path / "source"
     source_dir.mkdir()
-    root_api_key = "test-root-key"
-    template = tmp_path / "openviking.conf"
-    template.write_text(
-        f'{{"server": {{"host": "0.0.0.0", "port": 1933, "root_api_key": "{root_api_key}"}}}}',
-        encoding="utf-8",
-    )
+    model_config = _write_model_config(tmp_path)
     config = UserServerConfig.model_validate(
         {
-            "defaults": {"data_root": str(tmp_path / "data"), "backend_port": 1933},
+            "defaults": {
+                "data_root": str(tmp_path / "data"),
+                "backend_port": 1933,
+                "openviking": {"model_config_file": str(model_config)},
+            },
             "services": {
                 "alpha": {
                     "stable_port": 18080,
                     "source": {"type": "local", "path": str(source_dir)},
-                    "openviking": {"template_path": str(template)},
                 }
             },
         }
@@ -234,15 +238,49 @@ def test_materialize_service_renders_ovcli_config_from_root_api_key(tmp_path) ->
     service = render_locked_config(config).services["alpha"]
     materialize_service(service)
 
+    root_api_key = json.loads(service.openviking.config_file.read_text(encoding="utf-8"))["server"][
+        "root_api_key"
+    ]
     assert service.openviking.cli_config_file.read_text(encoding="utf-8") == (
         "{\n"
         '  "url": "http://127.0.0.1:1933",\n'
-        '  "api_key": "test-root-key",\n'
+        f'  "api_key": "{root_api_key}",\n'
         '  "account": "default",\n'
         '  "user": "default"\n'
         "}\n"
     )
-    assert "test-root-key" not in service.model_dump_json()
+    assert root_api_key not in service.model_dump_json()
+
+
+def test_materialize_service_preserves_existing_root_api_key(tmp_path) -> None:
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    model_config = _write_model_config(tmp_path)
+    config = UserServerConfig.model_validate(
+        {
+            "defaults": {
+                "data_root": str(tmp_path / "data"),
+                "openviking": {"model_config_file": str(model_config)},
+            },
+            "services": {
+                "alpha": {
+                    "stable_port": 18080,
+                    "source": {"type": "local", "path": str(source_dir)},
+                }
+            },
+        }
+    )
+    service = render_locked_config(config).services["alpha"]
+    service.openviking.config_file.parent.mkdir(parents=True)
+    service.openviking.config_file.write_text(
+        json.dumps({"server": {"root_api_key": "existing-root"}}),
+        encoding="utf-8",
+    )
+
+    materialize_service(service)
+
+    payload = json.loads(service.openviking.config_file.read_text(encoding="utf-8"))
+    assert payload["server"]["root_api_key"] == "existing-root"
 
 
 def test_lock_does_not_include_secret_file_contents(tmp_path) -> None:
@@ -321,19 +359,61 @@ def test_user_config_rejects_missing_local_source(tmp_path) -> None:
         )
 
 
-def test_user_config_rejects_missing_template_path(tmp_path) -> None:
-    with pytest.raises(ValidationError, match="template_path must exist"):
-        UserServerConfig.model_validate(
-            {
-                "services": {
-                    "alpha": {
-                        "stable_port": 18080,
-                        "source": {"type": "local", "path": "."},
-                        "openviking": {"template_path": str(tmp_path / "missing.conf")},
-                    },
-                }
-            }
-        )
+def test_openviking_validation_rejects_template_path(tmp_path) -> None:
+    template = tmp_path / "openviking.conf"
+    template.write_text("{}", encoding="utf-8")
+    model_config = _write_model_config(tmp_path)
+    config = UserServerConfig.model_validate(
+        {
+            "defaults": {"openviking": {"model_config_file": str(model_config)}},
+            "services": {
+                "alpha": {
+                    "stable_port": 18080,
+                    "source": {"type": "local", "path": "."},
+                    "openviking": {"template_path": str(template)},
+                },
+            },
+        }
+    )
+
+    with pytest.raises(ValueError, match="template_path is deprecated"):
+        validate_openviking_model_config(config)
+
+
+def test_openviking_validation_rejects_missing_model_config(tmp_path) -> None:
+    config = UserServerConfig.model_validate(
+        {
+            "defaults": {"openviking": {"model_config_file": str(tmp_path / "missing.json")}},
+            "services": {
+                "alpha": {
+                    "stable_port": 18080,
+                    "source": {"type": "local", "path": "."},
+                },
+            },
+        }
+    )
+
+    with pytest.raises(ValueError, match="model_config_file must exist"):
+        validate_openviking_model_config(config)
+
+
+def test_openviking_validation_rejects_unknown_model_sections(tmp_path) -> None:
+    model_config = tmp_path / "model.json"
+    model_config.write_text(json.dumps({"server": {"port": 1}}), encoding="utf-8")
+    config = UserServerConfig.model_validate(
+        {
+            "defaults": {"openviking": {"model_config_file": str(model_config)}},
+            "services": {
+                "alpha": {
+                    "stable_port": 18080,
+                    "source": {"type": "local", "path": "."},
+                },
+            },
+        }
+    )
+
+    with pytest.raises(ValueError, match="may only contain top-level sections"):
+        validate_openviking_model_config(config)
 
 
 def test_user_config_rejects_invalid_env_key() -> None:
@@ -345,6 +425,21 @@ def test_user_config_rejects_invalid_env_key() -> None:
                         "stable_port": 18080,
                         "source": {"type": "local", "path": "."},
                         "openviking": {"env": {"bad-key": "value"}},
+                    },
+                }
+            }
+        )
+
+
+def test_user_config_rejects_managed_env_key() -> None:
+    with pytest.raises(ValidationError, match="managed by ov-mgn"):
+        UserServerConfig.model_validate(
+            {
+                "services": {
+                    "alpha": {
+                        "stable_port": 18080,
+                        "source": {"type": "local", "path": "."},
+                        "openviking": {"env": {"OPENVIKING_CONFIG_FILE": "/tmp/openviking.conf"}},
                     },
                 }
             }
@@ -395,3 +490,22 @@ def test_save_user_config_is_atomic_when_replace_fails(tmp_path, monkeypatch) ->
         save_user_server_config(config, config_path)
 
     assert config_path.read_text(encoding="utf-8") == '{"original": true}\n'
+
+
+def _write_model_config(tmp_path):
+    path = tmp_path / "model.json"
+    path.write_text(
+        json.dumps(
+            {
+                "embedding": {
+                    "dense": {
+                        "provider": "openai",
+                        "api_key": "secret",
+                        "model": "text-embedding-3-small",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path

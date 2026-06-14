@@ -22,6 +22,7 @@ from ov_mgn.server_config import (
     load_user_server_config,
     render_locked_config,
     save_user_server_config_data,
+    validate_openviking_model_config,
     write_lock_file,
 )
 from ov_mgn.status import build_services_summary
@@ -267,7 +268,8 @@ def show_config_file(config_path: Path | None, path: str | None) -> None:
 @click.option("--config-path", type=click.Path(dir_okay=False, path_type=Path), default=None)
 def validate_config_file(config_path: Path | None) -> None:
     """Validate user configuration from server.json."""
-    _load_user_config_or_fail(config_path)
+    config = _load_user_config_or_fail(config_path)
+    _validate_openviking_or_fail(config)
     click.echo("valid")
 
 
@@ -326,6 +328,7 @@ def show_server_config_paths() -> None:
 def render_server_config(config_path: Path | None) -> None:
     """Render server.json as the expanded lock configuration."""
     config = load_user_server_config(config_path)
+    _validate_openviking_or_fail(config)
     source = config_path or get_server_config_path()
     locked = render_locked_config(config, source=source)
     click.echo(json.dumps(locked.model_dump(mode="json"), ensure_ascii=False, indent=2))
@@ -351,6 +354,7 @@ def lock_server_config(config_path: Path | None, lock_path: Path | None) -> None
 
 def _write_plan(config_path: Path | None, lock_path: Path | None) -> Path:
     config = load_user_server_config(config_path)
+    _validate_openviking_or_fail(config)
     source = config_path or get_server_config_path()
     locked = render_locked_config(config, source=source)
     return write_lock_file(locked, lock_path)
@@ -378,6 +382,13 @@ def _save_user_config_payload_or_fail(payload: dict[str, Any], path: Path | None
     try:
         save_user_server_config_data(payload, path)
     except (OSError, ValidationError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
+def _validate_openviking_or_fail(config: UserServerConfig) -> None:
+    try:
+        validate_openviking_model_config(config)
+    except (OSError, json.JSONDecodeError, ValidationError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
 
 

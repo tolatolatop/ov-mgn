@@ -69,17 +69,19 @@ def test_top_level_help_hides_server_config_group() -> None:
 
 def test_server_config_render_command(tmp_path) -> None:
     config_path = tmp_path / "server.json"
+    model_config = _write_model_config(tmp_path)
     config_path.write_text(
-        """
-        {
-          "services": {
-            "alpha": {
-              "stable_port": 18080,
-              "source": {"type": "local", "path": "."}
+        json.dumps(
+            {
+                "defaults": {"openviking": {"model_config_file": str(model_config)}},
+                "services": {
+                    "alpha": {
+                        "stable_port": 18080,
+                        "source": {"type": "local", "path": "."},
+                    }
+                },
             }
-          }
-        }
-        """,
+        ),
         encoding="utf-8",
     )
 
@@ -95,17 +97,19 @@ def test_server_config_render_command(tmp_path) -> None:
 def test_server_config_lock_command_writes_read_only_file(tmp_path) -> None:
     config_path = tmp_path / "server.json"
     lock_path = tmp_path / "server.json.lock"
+    model_config = _write_model_config(tmp_path)
     config_path.write_text(
-        """
-        {
-          "services": {
-            "alpha": {
-              "stable_port": 18080,
-              "source": {"type": "local", "path": "."}
+        json.dumps(
+            {
+                "defaults": {"openviking": {"model_config_file": str(model_config)}},
+                "services": {
+                    "alpha": {
+                        "stable_port": 18080,
+                        "source": {"type": "local", "path": "."},
+                    }
+                },
             }
-          }
-        }
-        """,
+        ),
         encoding="utf-8",
     )
 
@@ -129,18 +133,22 @@ def test_server_config_lock_command_writes_read_only_file(tmp_path) -> None:
 def test_plan_command_writes_lock(tmp_path) -> None:
     config_path = tmp_path / "server.json"
     lock_path = tmp_path / "server.json.lock"
+    model_config = _write_model_config(tmp_path)
     config_path.write_text(
-        """
-        {
-          "defaults": {"port_range": [31000, 31000]},
-          "services": {
-            "alpha": {
-              "stable_port": 18080,
-              "source": {"type": "local", "path": "."}
+        json.dumps(
+            {
+                "defaults": {
+                    "port_range": [31000, 31000],
+                    "openviking": {"model_config_file": str(model_config)},
+                },
+                "services": {
+                    "alpha": {
+                        "stable_port": 18080,
+                        "source": {"type": "local", "path": "."},
+                    }
+                },
             }
-          }
-        }
-        """,
+        ),
         encoding="utf-8",
     )
 
@@ -154,10 +162,14 @@ def test_plan_command_writes_lock(tmp_path) -> None:
 
 
 def test_status_command_can_skip_docker(tmp_path) -> None:
+    config_path = tmp_path / "server.json"
+    config_path.write_text('{"services": {}}\n', encoding="utf-8")
     result = CliRunner().invoke(
         main,
         [
             "status",
+            "--config-path",
+            str(config_path),
             "--lock-path",
             str(tmp_path / "missing.lock"),
             "--release-path",
@@ -842,6 +854,7 @@ def _write_config(
     include_image: bool = True,
     template_path=None,
 ) -> None:
+    model_config = _write_model_config(config_path.parent)
     alpha = {
         "enabled": True,
         "stable_host": "127.0.0.1",
@@ -868,6 +881,7 @@ def _write_config(
                 "defaults": {
                     "data_root": str(config_path.parent / "data"),
                     "port_range": [31000, 31999],
+                    "openviking": {"model_config_file": str(model_config)},
                 },
                 "services": services,
             },
@@ -875,3 +889,12 @@ def _write_config(
         ),
         encoding="utf-8",
     )
+
+
+def _write_model_config(path):
+    model_config = path / "model.json"
+    model_config.write_text(
+        json.dumps({"embedding": {"dense": {"provider": "openai", "api_key": "secret"}}}),
+        encoding="utf-8",
+    )
+    return model_config

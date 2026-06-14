@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -7,6 +8,7 @@ from ov_mgn.server_config import (
     LockedServiceSpec,
     ReleaseLock,
     RuntimeServiceState,
+    configure_openviking_user,
     load_locked_config,
     load_release_lock,
     load_state,
@@ -35,6 +37,8 @@ def up_service(
     promote_data_dir(service)
     client.ensure_gateway_network(locked.gateway.network_name)
     client.run_backend(service_name, service)
+    service = _bootstrap_openviking_user(service_name, service, client)
+    locked.services[service_name] = service
 
     state = load_state(state_path)
     state.updated_at = datetime.now(UTC)
@@ -187,6 +191,67 @@ def _reload_gateway(
         config_path=locked.gateway_config_path,
     )
     client.reload_gateway(locked.gateway_container_name)
+
+
+def _bootstrap_openviking_user(
+    service_name: str,
+    service: LockedServiceSpec,
+    client: DockerClient,
+) -> LockedServiceSpec:
+    if not _openviking_root_api_key_present(service):
+        return service
+    if getattr(client, "dry_run", False):
+        return service
+
+    client.wait_healthy(service.release_container_name)
+    client.settle(5)
+    user_key = _ensure_openviking_user_key(service, client)
+    return configure_openviking_user(service, api_key=user_key)
+
+
+def _openviking_root_api_key_present(service: LockedServiceSpec) -> bool:
+    if service.openviking.cli_config_file is None or not service.openviking.config_file.exists():
+        return False
+    try:
+        payload = json.loads(service.openviking.config_file.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return False
+    root_api_key = (
+        payload.get("server", {}).get("root_api_key") if isinstance(payload, dict) else None
+    )
+    return isinstance(root_api_key, str) and bool(root_api_key)
+
+
+def _ensure_openviking_user_key(service: LockedServiceSpec, client: DockerClient) -> str:
+    register = client.exec(
+        service.release_container_name,
+        ["ov", "admin", "register-user", "default", "default", "-o", "json"],
+        capture_output=True,
+        allow_failure=True,
+    )
+    if register and register.returncode == 0:
+        return _extract_user_key(register.stdout)
+
+    regenerate = client.exec(
+        service.release_container_name,
+        ["ov", "admin", "regenerate-key", "default", "default", "-o", "json"],
+        capture_output=True,
+    )
+    if regenerate is None:
+        raise RuntimeError("failed to bootstrap OpenViking user key")
+    return _extract_user_key(regenerate.stdout)
+
+
+def _extract_user_key(output: str) -> str:
+    try:
+        payload = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("OpenViking user bootstrap did not return JSON") from exc
+    result = payload.get("result") if isinstance(payload, dict) else None
+    user_key = result.get("user_key") if isinstance(result, dict) else None
+    if not isinstance(user_key, str) or not user_key:
+        raise RuntimeError("OpenViking user bootstrap response did not include user_key")
+    return user_key
 
 
 def _service_for_release(

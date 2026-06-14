@@ -1,11 +1,18 @@
 import html
 import json
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ov_mgn.server_config import LockedServerConfig, LockedServiceSpec, ReleaseLock, RuntimeState
+from ov_mgn.server_config import (
+    OPENVIKING_CONFIG_FILE,
+    LockedServerConfig,
+    LockedServiceSpec,
+    ReleaseLock,
+    RuntimeState,
+)
 
 LABEL_SERVICE = "ov-mgn.service"
 LABEL_ROLE = "ov-mgn.role"
@@ -30,6 +37,52 @@ class DockerClient:
         command = build_run_command(service_name, service, role="backend")
         self._run(command)
         return command
+
+    def exec(
+        self,
+        container_name: str,
+        command: list[str],
+        *,
+        capture_output: bool = False,
+        allow_failure: bool = False,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str] | None:
+        docker_command = ["docker", "exec"]
+        for key, value in sorted((env or {}).items()):
+            docker_command.extend(["-e", f"{key}={value}"])
+        return self._run(
+            [*docker_command, container_name, *command],
+            capture_output=capture_output,
+            allow_failure=allow_failure,
+        )
+
+    def wait_healthy(self, container_name: str, *, timeout_seconds: int = 60) -> None:
+        if self.dry_run:
+            return
+        deadline = time.monotonic() + timeout_seconds
+        last_status = "unknown"
+        while time.monotonic() < deadline:
+            result = self._run(
+                [
+                    "docker",
+                    "inspect",
+                    "-f",
+                    "{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}",
+                    container_name,
+                ],
+                capture_output=True,
+                allow_failure=True,
+            )
+            if result and result.returncode == 0:
+                last_status = result.stdout.strip()
+                if last_status in {"healthy", "running"}:
+                    return
+            time.sleep(2)
+        raise TimeoutError(f"container did not become healthy: {container_name} ({last_status})")
+
+    def settle(self, seconds: float) -> None:
+        if not self.dry_run:
+            time.sleep(seconds)
 
     def ensure_gateway(
         self,
@@ -246,9 +299,11 @@ def build_run_command(
     command.extend(
         [
             "-e",
+            f"OPENVIKING_CONFIG_FILE={OPENVIKING_CONFIG_FILE}",
+            "-e",
             "OPENVIKING_CLI_CONFIG_FILE=/app/config/ovcli.conf",
             "-e",
-            "PATH=/app/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "PATH=/app/config/bin:/app/.venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         ]
     )
 

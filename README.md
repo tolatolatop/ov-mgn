@@ -97,10 +97,13 @@ secret file contents are not read into validate, show, lock, or status output.
 {
   "defaults": {
     "port_range": [30000, 39999],
-    "image": "openviking/openviking:latest",
+    "image": "ghcr.io/volcengine/openviking:latest",
     "backend_port": 1933,
     "data_root": "~/.ov_mgn/data",
     "secret_env_file": null,
+    "openviking": {
+      "model_config_file": "~/.ov_mgn/model.json"
+    },
     "gateway": {
       "enabled": true,
       "host": "127.0.0.1",
@@ -142,6 +145,15 @@ Secrets are passed to Docker with `--env-file`; secret values are not read into
 the lock file. `backend_port` is the port exposed by the service inside the
 container; current OpenViking images listen on `1933`.
 
+Real OpenViking deployments should provide `defaults.openviking.model_config_file`
+pointing at a private JSON file, normally `~/.ov_mgn/model.json`. That file may
+only contain `embedding`, `vlm`, and `bot` top-level sections. `ov-mgn`
+generates the rest of `/app/config/openviking.conf`, including
+`server.host=0.0.0.0`, `server.port=defaults.backend_port`,
+`storage.workspace=/app/data`, and a release-local `server.root_api_key`.
+`OPENVIKING_CONFIG_FILE=/app/config/openviking.conf` is injected into the
+container automatically; do not set it in `openviking.env`.
+
 Gateway mode is the only supported deployment model. `defaults.gateway.enabled`
 must remain `true`; setting it to `false` is rejected. The external service URL
 is `http://{defaults.gateway.host}:{defaults.gateway.port}{route_path}`.
@@ -177,3 +189,16 @@ The built-in `__ov-mgn` paths are reserved and cannot be used as service
 and `down` gateway reload.
 The first gateway release model supports candidate preview plus manual
 `promote`/`switch`; it does not do percentage-weighted traffic splitting.
+
+Backend containers also include a release-local `ov` wrapper at
+`/app/config/bin/ov`. It is placed before the image's native CLI in `PATH` and
+refreshes a temporary `default/default` user key for ordinary `ov` commands, so
+commands such as `docker exec <container> ov ls ...` and
+`docker exec <container> ov chat ...` do not require operators to maintain a
+static user API key. Run container-side `ov` commands serially; concurrent
+commands can invalidate each other's temporary key.
+
+To import a deployed release's source into OpenViking resources, run
+`ov add-resource /app/code --to viking://resources/{service}-code` inside the
+backend container and verify with `ov stat` or `ov tree`. See the maintenance
+manual for the full command, ignore/exclude options, and wait-queue caveats.

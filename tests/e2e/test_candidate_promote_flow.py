@@ -1,4 +1,5 @@
 import json
+import time
 
 from click.testing import CliRunner
 
@@ -11,6 +12,7 @@ def test_candidate_promote_flow_e2e_without_real_docker(tmp_path) -> None:
     source_dir = workspace / "openviking-alpha"
     data_root = workspace / "data"
     secret_env_file = workspace / "secrets.env"
+    model_config_file = workspace / "model.json"
     config_path = workspace / "server.json"
     lock_path = workspace / "server.json.lock"
     release_path = workspace / "release.json.lock"
@@ -19,6 +21,20 @@ def test_candidate_promote_flow_e2e_without_real_docker(tmp_path) -> None:
     source_dir.mkdir()
     (source_dir / "app.py").write_text("VERSION = 'candidate'\n", encoding="utf-8")
     secret_env_file.write_text("OPENVIKING_TOKEN=super-secret\n", encoding="utf-8")
+    model_config_file.write_text(
+        json.dumps(
+            {
+                "embedding": {
+                    "dense": {
+                        "provider": "openai",
+                        "api_key": "model-secret",
+                        "model": "text-embedding-3-small",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
     config_path.write_text(
         json.dumps(
             {
@@ -27,6 +43,7 @@ def test_candidate_promote_flow_e2e_without_real_docker(tmp_path) -> None:
                     "image": "openviking/openviking:latest",
                     "data_root": str(workspace / "default-data"),
                     "secret_env_file": None,
+                    "openviking": {"model_config_file": str(model_config_file)},
                 },
                 "services": {
                     "alpha": {
@@ -130,6 +147,7 @@ def test_candidate_promote_flow_e2e_without_real_docker(tmp_path) -> None:
     assert plan.exit_code == 0, plan.output
     assert lock_path.exists()
     assert "super-secret" not in lock_path.read_text(encoding="utf-8")
+    assert "model-secret" not in lock_path.read_text(encoding="utf-8")
     locked = load_locked_config(lock_path)
     service = locked.services["alpha"]
     assert service.candidate_port == 31000
@@ -151,7 +169,9 @@ def test_candidate_promote_flow_e2e_without_real_docker(tmp_path) -> None:
     assert up.exit_code == 0, up.output
     assert service.release_id in up.output
     assert (service.code_dir / "app.py").read_text(encoding="utf-8") == "VERSION = 'candidate'\n"
-    assert 'profile = "alpha-e2e"' in service.openviking.config_file.read_text(encoding="utf-8")
+    rendered = json.loads(service.openviking.config_file.read_text(encoding="utf-8"))
+    assert rendered["runtime"]["profile"] == "alpha-e2e"
+    assert rendered["embedding"]["dense"]["api_key"] == "model-secret"
     assert load_state(state_path).services["alpha"].candidate_release_id == service.release_id
 
     (source_dir / "app.py").write_text("VERSION = 'after-up-edit'\n", encoding="utf-8")
@@ -188,6 +208,8 @@ def test_candidate_promote_flow_e2e_without_real_docker(tmp_path) -> None:
         main,
         [
             "status",
+            "--config-path",
+            str(config_path),
             "--lock-path",
             str(lock_path),
             "--release-path",
@@ -199,8 +221,180 @@ def test_candidate_promote_flow_e2e_without_real_docker(tmp_path) -> None:
     )
 
     assert status.exit_code == 0, status.output
+    assert "model-secret" not in status.output
     payload = json.loads(status.output)
     assert payload["docker"] is None
     assert payload["lock"]["services"]["alpha"]["release_id"] == service.release_id
     assert payload["release"]["services"]["alpha"]["release_id"] == service.release_id
     assert payload["state"]["services"]["alpha"]["online_release_id"] == service.release_id
+
+
+def test_model_json_update_requires_new_candidate_and_promote(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    source_dir = workspace / "openviking-alpha"
+    model_config_file = workspace / "model.json"
+    config_path = workspace / "server.json"
+    lock_path = workspace / "server.json.lock"
+    release_path = workspace / "release.json.lock"
+    state_path = workspace / "state.json.lock"
+    workspace.mkdir()
+    source_dir.mkdir()
+    (source_dir / "app.py").write_text("VERSION = 'model-update'\n", encoding="utf-8")
+    _write_model_config(model_config_file, api_key="model-secret-v1", model="embedding-v1")
+    config_path.write_text(
+        json.dumps(
+            {
+                "defaults": {
+                    "port_range": [31000, 31010],
+                    "image": "example/openviking:test",
+                    "data_root": str(workspace / "data"),
+                    "openviking": {"model_config_file": str(model_config_file)},
+                },
+                "services": {
+                    "alpha": {
+                        "source": {"type": "local", "path": str(source_dir)},
+                        "openviking": {"vars": {"profile": "alpha-model-update"}},
+                    }
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+
+    validate_v1 = runner.invoke(
+        main, ["config-file", "validate", "--config-path", str(config_path)]
+    )
+    plan_v1 = runner.invoke(
+        main, ["plan", "--config-path", str(config_path), "--lock-path", str(lock_path)]
+    )
+    assert validate_v1.exit_code == 0, validate_v1.output
+    assert plan_v1.exit_code == 0, plan_v1.output
+    first_service = load_locked_config(lock_path).services["alpha"]
+
+    up_v1 = runner.invoke(
+        main,
+        [
+            "up",
+            "alpha",
+            "--lock-path",
+            str(lock_path),
+            "--state-path",
+            str(state_path),
+            "--dry-run",
+        ],
+    )
+    promote_v1 = runner.invoke(
+        main,
+        [
+            "promote",
+            "alpha",
+            "--lock-path",
+            str(lock_path),
+            "--release-path",
+            str(release_path),
+            "--state-path",
+            str(state_path),
+            "--dry-run",
+        ],
+    )
+    assert up_v1.exit_code == 0, up_v1.output
+    assert promote_v1.exit_code == 0, promote_v1.output
+    first_rendered = json.loads(first_service.openviking.config_file.read_text(encoding="utf-8"))
+    assert first_rendered["embedding"]["dense"]["api_key"] == "model-secret-v1"
+    assert first_rendered["embedding"]["dense"]["model"] == "embedding-v1"
+    assert load_state(state_path).services["alpha"].online_release_id == first_service.release_id
+
+    _write_model_config(model_config_file, api_key="model-secret-v2", model="embedding-v2")
+    time.sleep(1.1)
+
+    validate_v2 = runner.invoke(
+        main, ["config-file", "validate", "--config-path", str(config_path)]
+    )
+    plan_v2 = runner.invoke(
+        main, ["plan", "--config-path", str(config_path), "--lock-path", str(lock_path)]
+    )
+    assert validate_v2.exit_code == 0, validate_v2.output
+    assert plan_v2.exit_code == 0, plan_v2.output
+    second_service = load_locked_config(lock_path).services["alpha"]
+    assert second_service.release_id != first_service.release_id
+
+    up_v2 = runner.invoke(
+        main,
+        [
+            "up",
+            "alpha",
+            "--lock-path",
+            str(lock_path),
+            "--state-path",
+            str(state_path),
+            "--dry-run",
+        ],
+    )
+    assert up_v2.exit_code == 0, up_v2.output
+    second_rendered = json.loads(second_service.openviking.config_file.read_text(encoding="utf-8"))
+    assert second_rendered["embedding"]["dense"]["api_key"] == "model-secret-v2"
+    assert second_rendered["embedding"]["dense"]["model"] == "embedding-v2"
+    assert "model-secret-v1" not in lock_path.read_text(encoding="utf-8")
+    assert "model-secret-v2" not in lock_path.read_text(encoding="utf-8")
+
+    candidate_state = load_state(state_path).services["alpha"]
+    assert candidate_state.candidate_release_id == second_service.release_id
+    assert candidate_state.online_release_id == first_service.release_id
+
+    candidate_status = runner.invoke(
+        main,
+        [
+            "status",
+            "--config-path",
+            str(config_path),
+            "--lock-path",
+            str(lock_path),
+            "--release-path",
+            str(release_path),
+            "--state-path",
+            str(state_path),
+            "--no-docker",
+        ],
+    )
+    assert candidate_status.exit_code == 0, candidate_status.output
+    assert "model-secret-v1" not in candidate_status.output
+    assert "model-secret-v2" not in candidate_status.output
+
+    promote_v2 = runner.invoke(
+        main,
+        [
+            "promote",
+            "alpha",
+            "--lock-path",
+            str(lock_path),
+            "--release-path",
+            str(release_path),
+            "--state-path",
+            str(state_path),
+            "--dry-run",
+        ],
+    )
+    assert promote_v2.exit_code == 0, promote_v2.output
+    assert load_release_lock(release_path).services["alpha"].release_id == second_service.release_id
+    final_state = load_state(state_path).services["alpha"]
+    assert final_state.candidate_release_id is None
+    assert final_state.online_release_id == second_service.release_id
+
+
+def _write_model_config(path, *, api_key: str, model: str) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "embedding": {
+                    "dense": {
+                        "provider": "openai",
+                        "api_key": api_key,
+                        "model": model,
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )

@@ -56,8 +56,9 @@ def test_backend_run_command_includes_labels_env_file_volumes_and_no_host_port(t
     assert "--env-file" in command
     assert f"{service.config_dir}:/app/config:ro" in command
     assert f"{service.release_data_dir}:/app/data" in command
+    assert "OPENVIKING_CONFIG_FILE=/app/config/openviking.conf" in command
     assert "OPENVIKING_CLI_CONFIG_FILE=/app/config/ovcli.conf" in command
-    assert any(value.startswith("PATH=/app/.venv/bin:") for value in command)
+    assert any(value.startswith("PATH=/app/config/bin:/app/.venv/bin:") for value in command)
     assert "TZ=Asia/Shanghai" in command
 
 

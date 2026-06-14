@@ -1,23 +1,24 @@
-import json
-import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
+from ov_mgn.branch_data import prepare_release_data
 from ov_mgn.docker import DockerClient, write_gateway_config
+from ov_mgn.logging import get_logger
+from ov_mgn.openviking_bootstrap import bootstrap_openviking_user
 from ov_mgn.server_config import (
     LockedServerConfig,
     LockedServiceSpec,
     ReleaseLock,
     RuntimeServiceState,
-    configure_openviking_user,
     load_locked_config,
     load_release_lock,
     load_state,
     materialize_service,
-    promote_data_dir,
     write_release_lock,
     write_state,
 )
+
+logger = get_logger(__name__)
 
 
 def up_service(
@@ -28,6 +29,13 @@ def up_service(
     state_path: Path | None = None,
     docker: DockerClient | None = None,
 ) -> tuple[str, int]:
+    logger.debug(
+        "lifecycle up start service=%s lock_path=%s release_path=%s state_path=%s",
+        service_name,
+        lock_path,
+        release_path,
+        state_path,
+    )
     locked = load_locked_config(lock_path)
     service = _get_locked_service(locked, service_name)
     if not service.enabled:
@@ -37,16 +45,19 @@ def up_service(
     client = docker or DockerClient()
     release = load_release_lock(release_path)
     state = load_state(state_path)
-    _prepare_release_data(
+    copied_branch_data = prepare_release_data(
         service_name=service_name,
         service=service,
         locked=locked,
         release=release,
         state=state,
     )
+    logger.debug(
+        "lifecycle up data prepared service=%s branch_copy=%s", service_name, copied_branch_data
+    )
     client.ensure_gateway_network(locked.gateway.network_name)
     client.run_backend(service_name, service)
-    service = _bootstrap_openviking_user(service_name, service, client)
+    service = bootstrap_openviking_user(service_name, service, client)
     locked.services[service_name] = service
 
     state.updated_at = datetime.now(UTC)
@@ -56,8 +67,10 @@ def up_service(
         stable_host=service.stable_host,
         stable_port=service.stable_port,
     )
+    logger.debug("writing runtime state service=%s state_path=%s", service_name, state_path)
     write_state(state, state_path)
     _reload_gateway(locked=locked, release=release, state=state, client=client)
+    logger.debug("lifecycle up complete service=%s release_id=%s", service_name, service.release_id)
     return service.release_id, service.candidate_port
 
 
@@ -69,6 +82,13 @@ def promote_service(
     state_path: Path | None = None,
     docker: DockerClient | None = None,
 ) -> str:
+    logger.debug(
+        "lifecycle promote start service=%s lock_path=%s release_path=%s state_path=%s",
+        service_name,
+        lock_path,
+        release_path,
+        state_path,
+    )
     locked = load_locked_config(lock_path)
     service = _get_locked_service(locked, service_name)
     client = docker or DockerClient()
@@ -76,6 +96,12 @@ def promote_service(
     release = load_release_lock(release_path)
     release.updated_at = datetime.now(UTC)
     release.services[service_name] = service
+    logger.debug(
+        "writing release lock service=%s release_id=%s path=%s",
+        service_name,
+        service.release_id,
+        release_path,
+    )
     write_release_lock(release, release_path)
 
     state = load_state(state_path)
@@ -86,8 +112,12 @@ def promote_service(
         stable_host=service.stable_host,
         stable_port=service.stable_port,
     )
+    logger.debug("writing runtime state service=%s state_path=%s", service_name, state_path)
     write_state(state, state_path)
     _reload_gateway(locked=locked, release=release, state=state, client=client)
+    logger.debug(
+        "lifecycle promote complete service=%s release_id=%s", service_name, service.release_id
+    )
     return service.release_id
 
 
@@ -100,6 +130,15 @@ def switch_service(
     state_path: Path | None = None,
     docker: DockerClient | None = None,
 ) -> str:
+    logger.debug(
+        "lifecycle switch start service=%s release_id=%s lock_path=%s "
+        "release_path=%s state_path=%s",
+        service_name,
+        release_id,
+        lock_path,
+        release_path,
+        state_path,
+    )
     locked = load_locked_config(lock_path)
     service = _get_locked_service(locked, service_name)
     switched = _service_for_release(service_name, service, release_id)
@@ -110,6 +149,12 @@ def switch_service(
     release = load_release_lock(release_path)
     release.updated_at = datetime.now(UTC)
     release.services[service_name] = switched
+    logger.debug(
+        "writing release lock service=%s release_id=%s path=%s",
+        service_name,
+        release_id,
+        release_path,
+    )
     write_release_lock(release, release_path)
 
     state = load_state(state_path)
@@ -122,8 +167,10 @@ def switch_service(
         stable_host=service.stable_host,
         stable_port=service.stable_port,
     )
+    logger.debug("writing runtime state service=%s state_path=%s", service_name, state_path)
     write_state(state, state_path)
     _reload_gateway(locked=locked, release=release, state=state, client=client)
+    logger.debug("lifecycle switch complete service=%s release_id=%s", service_name, release_id)
     return release_id
 
 
@@ -135,6 +182,13 @@ def down_service(
     state_path: Path | None = None,
     docker: DockerClient | None = None,
 ) -> None:
+    logger.debug(
+        "lifecycle down start service=%s lock_path=%s release_path=%s state_path=%s",
+        service_name,
+        lock_path,
+        release_path,
+        state_path,
+    )
     client = docker or DockerClient()
     stable_host = None
     stable_port = None
@@ -168,10 +222,12 @@ def down_service(
         stable_port=runtime.stable_port or stable_port,
     )
     state.updated_at = datetime.now(UTC)
+    logger.debug("writing runtime state service=%s state_path=%s", service_name, state_path)
     write_state(state, state_path)
     if locked:
         release = load_release_lock(release_path)
         _reload_gateway(locked=locked, release=release, state=state, client=client)
+    logger.debug("lifecycle down complete service=%s", service_name)
 
 
 def _get_locked_service(config: LockedServerConfig, service_name: str):
@@ -188,6 +244,11 @@ def _reload_gateway(
     state,
     client: DockerClient,
 ) -> None:
+    logger.debug(
+        "reloading gateway container=%s config_path=%s",
+        locked.gateway_container_name,
+        locked.gateway_config_path,
+    )
     write_gateway_config(locked=locked, release=release, state=state)
     client.ensure_gateway(
         container_name=locked.gateway_container_name,
@@ -198,132 +259,6 @@ def _reload_gateway(
         config_path=locked.gateway_config_path,
     )
     client.reload_gateway(locked.gateway_container_name)
-
-
-def _prepare_release_data(
-    *,
-    service_name: str,
-    service: LockedServiceSpec,
-    locked: LockedServerConfig,
-    release: ReleaseLock,
-    state,
-) -> None:
-    if service.branch and _branch_needs_initial_data_copy(service_name, release, state):
-        _copy_branch_parent_data(
-            service_name=service_name, service=service, locked=locked, release=release, state=state
-        )
-        return
-    promote_data_dir(service)
-
-
-def _branch_needs_initial_data_copy(
-    service_name: str,
-    release: ReleaseLock,
-    state,
-) -> bool:
-    runtime = state.services.get(service_name)
-    return service_name not in release.services and (
-        runtime is None
-        or (runtime.candidate_release_id is None and runtime.online_release_id is None)
-    )
-
-
-def _copy_branch_parent_data(
-    *,
-    service_name: str,
-    service: LockedServiceSpec,
-    locked: LockedServerConfig,
-    release: ReleaseLock,
-    state,
-) -> None:
-    if service.branch is None:
-        return
-    parent_service_name = service.branch.parent_service
-    parent_runtime = state.services.get(parent_service_name)
-    if parent_runtime is None or not parent_runtime.online_release_id:
-        raise ValueError(
-            f"branch service {service_name} requires parent service "
-            f"{parent_service_name} to have an online release"
-        )
-    parent_release_id = parent_runtime.online_release_id
-    if parent_service_name not in release.services:
-        raise ValueError(
-            f"branch parent service {parent_service_name} is missing from release lock"
-        )
-    parent_service = release.services[parent_service_name]
-    if parent_service.release_id != parent_release_id:
-        raise ValueError(
-            f"branch parent service {parent_service_name} release lock does not match "
-            f"online release {parent_release_id}"
-        )
-    parent_data_dir = parent_service.release_data_dir
-    if not parent_data_dir.exists() or not parent_data_dir.is_dir():
-        raise ValueError(f"branch parent data directory does not exist: {parent_data_dir}")
-    if service.release_data_dir.exists():
-        raise ValueError(f"branch target data directory already exists: {service.release_data_dir}")
-    service.release_data_dir.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(parent_data_dir, service.release_data_dir)
-
-
-def _bootstrap_openviking_user(
-    service_name: str,
-    service: LockedServiceSpec,
-    client: DockerClient,
-) -> LockedServiceSpec:
-    if not _openviking_root_api_key_present(service):
-        return service
-    if getattr(client, "dry_run", False):
-        return service
-
-    client.wait_healthy(service.release_container_name)
-    client.settle(5)
-    user_key = _ensure_openviking_user_key(service, client)
-    return configure_openviking_user(service, api_key=user_key)
-
-
-def _openviking_root_api_key_present(service: LockedServiceSpec) -> bool:
-    if service.openviking.cli_config_file is None or not service.openviking.config_file.exists():
-        return False
-    try:
-        payload = json.loads(service.openviking.config_file.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return False
-    root_api_key = (
-        payload.get("server", {}).get("root_api_key") if isinstance(payload, dict) else None
-    )
-    return isinstance(root_api_key, str) and bool(root_api_key)
-
-
-def _ensure_openviking_user_key(service: LockedServiceSpec, client: DockerClient) -> str:
-    register = client.exec(
-        service.release_container_name,
-        ["ov", "admin", "register-user", "default", "default", "-o", "json"],
-        capture_output=True,
-        allow_failure=True,
-    )
-    if register and register.returncode == 0:
-        return _extract_user_key(register.stdout)
-
-    regenerate = client.exec(
-        service.release_container_name,
-        ["ov", "admin", "regenerate-key", "default", "default", "-o", "json"],
-        capture_output=True,
-    )
-    if regenerate is None:
-        raise RuntimeError("failed to bootstrap OpenViking user key")
-    return _extract_user_key(regenerate.stdout)
-
-
-def _extract_user_key(output: str) -> str:
-    try:
-        payload = json.loads(output)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("OpenViking user bootstrap did not return JSON") from exc
-    result = payload.get("result") if isinstance(payload, dict) else None
-    user_key = result.get("user_key") if isinstance(result, dict) else None
-    if not isinstance(user_key, str) or not user_key:
-        raise RuntimeError("OpenViking user bootstrap response did not include user_key")
-    return user_key
 
 
 def _service_for_release(

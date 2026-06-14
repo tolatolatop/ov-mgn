@@ -4,7 +4,9 @@ from datetime import UTC, datetime
 from click.testing import CliRunner
 
 from ov_mgn import __version__
+from ov_mgn.branch_config import add_branch_service_config
 from ov_mgn.cli import main
+from ov_mgn.config_edit import get_config_path, parse_json_value, set_config_path, unset_config_path
 from ov_mgn.docker import DockerClient
 from ov_mgn.server_config import (
     ReleaseLock,
@@ -57,6 +59,24 @@ def test_cli_rejects_conflicting_log_shortcuts() -> None:
 
     assert result.exit_code != 0
     assert "--verbose and --quiet cannot be used together" in result.output
+
+
+def test_verbose_logs_to_stderr_and_keeps_stdout_json() -> None:
+    result = CliRunner().invoke(main, ["--verbose", "config"])
+
+    assert result.exit_code == 0
+    assert result.stdout.lstrip().startswith("{")
+    assert "DEBUG [ov_mgn.cli]" in result.stderr
+
+
+def test_default_and_quiet_do_not_print_debug_logs() -> None:
+    default = CliRunner().invoke(main, ["config"])
+    quiet = CliRunner().invoke(main, ["--quiet", "config"])
+
+    assert default.exit_code == 0
+    assert "DEBUG [ov_mgn.cli]" not in default.stderr
+    assert quiet.exit_code == 0
+    assert "DEBUG [ov_mgn.cli]" not in quiet.stderr
 
 
 def test_top_level_help_hides_server_config_group() -> None:
@@ -159,6 +179,36 @@ def test_plan_command_writes_lock(tmp_path) -> None:
 
     assert result.exit_code == 0
     assert lock_path.exists()
+
+
+def test_verbose_plan_logs_do_not_include_sensitive_model_content(tmp_path) -> None:
+    config_path = tmp_path / "server.json"
+    lock_path = tmp_path / "server.json.lock"
+    model_config = _write_model_config(tmp_path)
+    config_path.write_text(
+        json.dumps(
+            {
+                "defaults": {"openviking": {"model_config_file": str(model_config)}},
+                "services": {
+                    "alpha": {
+                        "stable_port": 18080,
+                        "source": {"type": "local", "path": "."},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["--verbose", "plan", "--config-path", str(config_path), "--lock-path", str(lock_path)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "DEBUG [ov_mgn" in result.stderr
+    for sensitive in ("api_key", "root_api_key", "VIKINGBOT_API_KEY", "secret"):
+        assert sensitive not in result.stderr
 
 
 def test_status_command_can_skip_docker(tmp_path) -> None:
@@ -586,6 +636,42 @@ def test_config_file_show_and_validate(tmp_path) -> None:
     assert show_path.output.strip() == "18080"
     assert validate.exit_code == 0, validate.output
     assert validate.output.strip() == "valid"
+
+
+def test_config_edit_helpers_read_write_and_unset_paths() -> None:
+    payload = {
+        "defaults": {"image": "default:1"},
+        "services": {"alpha": {"openviking": {"env": {}, "vars": {}}, "image": "old"}},
+    }
+
+    set_config_path(payload, "services.alpha.openviking.env.TZ", parse_json_value('"UTC"'))
+    set_config_path(payload, "services.alpha.image", "new")
+    assert get_config_path(payload, "services.alpha.openviking.env.TZ") == "UTC"
+    assert get_config_path(payload, "services.alpha.image") == "new"
+
+    unset_config_path(payload, "services.alpha.image")
+    assert "image" not in payload["services"]["alpha"]
+
+
+def test_branch_config_helper_copies_service_and_sets_branch(tmp_path) -> None:
+    config_path = tmp_path / "server.json"
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    _write_config(config_path, source_dir)
+    config = UserServerConfig.model_validate(json.loads(config_path.read_text(encoding="utf-8")))
+
+    updated = add_branch_service_config(
+        config,
+        source_service="alpha",
+        target_service="beta",
+        route_path="/beta/",
+    )
+
+    beta = updated.services["beta"]
+    assert beta.route_path == "/beta/"
+    assert beta.branch is not None
+    assert beta.branch.parent_service == "alpha"
+    assert beta.openviking.vars["profile"] == "beta"
 
 
 def test_config_file_show_missing_path_is_clear(tmp_path) -> None:

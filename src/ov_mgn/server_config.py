@@ -1,9 +1,6 @@
 import json
 import os
 import re
-import secrets
-import shutil
-import subprocess
 import tempfile
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -360,43 +357,20 @@ def render_locked_config(
     generated_at: datetime | None = None,
     used_ports: set[int] | None = None,
 ) -> LockedServerConfig:
-    generated_at = generated_at or datetime.now(UTC)
-    source = source or get_server_config_path()
-    allocated_ports = set(used_ports or set())
-    services: dict[str, LockedServiceSpec] = {}
+    from ov_mgn.server_render import render_locked_config as _render_locked_config
 
-    for name, spec in sorted(config.services.items()):
-        service = _render_locked_service(name, config.defaults, spec, generated_at, allocated_ports)
-        services[name] = service
-        allocated_ports.add(service.candidate_port)
-
-    return LockedServerConfig(
-        version=config.version,
-        generated_at=generated_at,
+    return _render_locked_config(
+        config,
         source=source,
-        gateway=config.defaults.gateway,
-        gateway_config_path=config.defaults.data_root.expanduser() / "gateway" / "nginx.conf",
-        gateway_container_name="ov-mgn-gateway",
-        services=services,
+        generated_at=generated_at,
+        used_ports=used_ports,
     )
 
 
 def validate_openviking_model_config(config: UserServerConfig) -> None:
-    if not config.services:
-        return
-    deprecated = [
-        name
-        for name, service in sorted(config.services.items())
-        if service.openviking.template_path is not None
-    ]
-    if deprecated:
-        services = ", ".join(deprecated)
-        raise ValueError(
-            "services."
-            f"{services}.openviking.template_path is deprecated; remove it and use "
-            "defaults.openviking.model_config_file"
-        )
-    _load_model_config(config.defaults.openviking.model_config_file)
+    from ov_mgn.openviking import validate_openviking_model_config as _validate
+
+    _validate(config)
 
 
 def write_lock_file(config: LockedServerConfig, path: Path | None = None) -> Path:
@@ -418,17 +392,9 @@ def write_state(config: RuntimeState, path: Path | None = None) -> Path:
 
 
 def materialize_service(service: LockedServiceSpec) -> None:
-    service.code_dir.mkdir(parents=True, exist_ok=True)
-    service.config_dir.mkdir(parents=True, exist_ok=True)
-    service.candidate_data_dir.mkdir(parents=True, exist_ok=True)
+    from ov_mgn.server_render import materialize_service as _materialize_service
 
-    if service.source.type == "local" and service.source.original_path:
-        if service.code_dir.exists():
-            shutil.rmtree(service.code_dir)
-        shutil.copytree(service.source.original_path.expanduser(), service.code_dir)
-
-    _render_managed_openviking_config(service)
-    _render_openviking_cli_wrapper(service)
+    _materialize_service(service)
 
 
 def configure_openviking_user(
@@ -438,333 +404,15 @@ def configure_openviking_user(
     account: str = "default",
     user: str = "default",
 ) -> LockedServiceSpec:
-    cli_config_file = (
-        service.openviking.cli_config_file or service.openviking.config_file.with_name("ovcli.conf")
-    )
-    cli_config = {
-        "url": f"http://127.0.0.1:{service.backend_port}",
-        "api_key": api_key,
-        "account": account,
-        "user": user,
-    }
-    cli_config_file.parent.mkdir(parents=True, exist_ok=True)
-    cli_config_file.write_text(
-        json.dumps(cli_config, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-    cli_config_file.chmod(0o600)
+    from ov_mgn.openviking import configure_openviking_user as _configure_openviking_user
 
-    runtime_env_file = service.config_dir / "runtime.env"
-    runtime_env_text = _merged_runtime_env(
-        service.secret_env_file,
-        {
-            "VIKINGBOT_ENDPOINT": f"http://127.0.0.1:{service.backend_port}/bot/v1",
-        },
-    )
-    runtime_env_file.write_text(runtime_env_text, encoding="utf-8")
-    runtime_env_file.chmod(0o600)
-    return service.model_copy(update={"secret_env_file": runtime_env_file})
+    return _configure_openviking_user(service, api_key=api_key, account=account, user=user)
 
 
 def promote_data_dir(service: LockedServiceSpec) -> None:
-    service.release_data_dir.parent.mkdir(parents=True, exist_ok=True)
-    if service.release_data_dir.exists():
-        return
-    if service.candidate_data_dir.exists():
-        shutil.move(str(service.candidate_data_dir), str(service.release_data_dir))
-    else:
-        service.release_data_dir.mkdir(parents=True, exist_ok=True)
+    from ov_mgn.server_render import promote_data_dir as _promote_data_dir
 
-
-def _render_locked_service(
-    name: str,
-    defaults: ServerDefaults,
-    spec: ServiceSpec,
-    generated_at: datetime,
-    used_ports: set[int],
-) -> LockedServiceSpec:
-    short_sha = _source_short_sha(spec.source)
-    release_id = f"{name}-{generated_at.strftime('%Y%m%dT%H%M%S')}-{short_sha}"
-    data_root = defaults.data_root.expanduser()
-    release_root = data_root / name / "releases" / release_id
-    candidate_port = _allocate_port(defaults.port_range, used_ports)
-    source = _lock_source(spec.source, release_root / "code")
-    variables = {"profile": name, "service": name, "release_id": release_id, **spec.openviking.vars}
-
-    return LockedServiceSpec(
-        enabled=spec.enabled,
-        image=spec.image or defaults.image,
-        backend_port=defaults.backend_port,
-        stable_host=spec.stable_host,
-        stable_port=spec.stable_port,
-        candidate_host=spec.stable_host,
-        candidate_port=candidate_port,
-        route_path=spec.route_path or f"/{name}/",
-        release_id=release_id,
-        source=source,
-        network_name=defaults.gateway.network_name,
-        candidate_container_name=f"ov-mgn-{name}-candidate-{release_id}",
-        online_container_name=f"ov-mgn-{name}-online",
-        release_container_name=f"ov-mgn-{name}-{release_id}",
-        code_dir=release_root / "code",
-        config_dir=release_root / "config",
-        candidate_data_dir=data_root / name / "candidates" / release_id / "data",
-        release_data_dir=release_root / "data",
-        secret_env_file=defaults.secret_env_file.expanduser() if defaults.secret_env_file else None,
-        openviking=LockedOpenViking(
-            vars=variables,
-            env=spec.openviking.env,
-            template_path=spec.openviking.template_path,
-            model_config_file=defaults.openviking.model_config_file.expanduser(),
-            config_file=release_root / "config" / "openviking.conf",
-            cli_config_file=release_root / "config" / "ovcli.conf",
-        ),
-        branch=spec.branch,
-    )
-
-
-def _source_short_sha(source: SourceSpec) -> str:
-    if source.type == "git":
-        commit = _resolve_git_commit(source)
-        return commit[:7]
-    if source.path:
-        return _resolve_local_sha(source.path)[:7]
-    return "unknown"
-
-
-def _lock_source(source: SourceSpec, code_dir: Path) -> LockedSource:
-    if source.type == "git":
-        return LockedSource(
-            type="git",
-            repo=source.repo,
-            ref=source.ref,
-            commit_sha=_resolve_git_commit(source),
-        )
-    return LockedSource(
-        type="local",
-        original_path=source.path.expanduser() if source.path else None,
-        snapshot_path=code_dir,
-    )
-
-
-def _resolve_git_commit(source: SourceSpec) -> str:
-    repo = source.repo or ""
-    ref = source.ref or "HEAD"
-    repo_path = Path(repo).expanduser()
-    if repo_path.exists():
-        command = ["git", "-C", str(repo_path), "rev-parse", ref]
-    else:
-        command = ["git", "ls-remote", repo, ref]
-    try:
-        result = subprocess.run(command, check=True, capture_output=True, text=True)
-    except (OSError, subprocess.CalledProcessError):
-        return "unknown"
-    output = result.stdout.strip()
-    if not output:
-        return "unknown"
-    return output.split()[0]
-
-
-def _resolve_local_sha(path: Path) -> str:
-    repo_path = path.expanduser()
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(repo_path), "rev-parse", "HEAD"],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-    except (OSError, subprocess.CalledProcessError):
-        return "local"
-    return result.stdout.strip() or "local"
-
-
-def _allocate_port(port_range: tuple[int, int], used_ports: set[int]) -> int:
-    start, end = port_range
-    for port in range(start, end + 1):
-        if port not in used_ports:
-            return port
-    raise ValueError(f"no free port in range {start}-{end}")
-
-
-def _render_managed_openviking_config(service: LockedServiceSpec) -> None:
-    if service.openviking.template_path is not None:
-        raise ValueError(
-            "openviking.template_path is deprecated; remove it and use "
-            "defaults.openviking.model_config_file"
-        )
-    root_api_key = _existing_root_api_key(service.openviking.config_file) or secrets.token_urlsafe(
-        32
-    )
-    model_config = _load_model_config(service.openviking.model_config_file)
-    config: dict[str, Any] = {
-        "server": {
-            "host": "0.0.0.0",
-            "port": service.backend_port,
-            "root_api_key": root_api_key,
-        },
-        "storage": {
-            "workspace": "/app/data",
-            "vectordb": {"name": "context", "backend": "local"},
-            "agfs": {"backend": "local"},
-        },
-    }
-    config.update(model_config)
-    rendered = json.dumps(config, ensure_ascii=False, indent=2) + "\n"
-    service.openviking.config_file.parent.mkdir(parents=True, exist_ok=True)
-    service.openviking.config_file.write_text(rendered, encoding="utf-8")
-    _render_openviking_cli_config(service, rendered)
-
-
-def _load_model_config(path: Path) -> dict[str, Any]:
-    model_config_path = path.expanduser()
-    if not model_config_path.exists() or not model_config_path.is_file():
-        raise ValueError(f"model_config_file must exist and be a file: {model_config_path}")
-    try:
-        payload = json.loads(model_config_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"model_config_file must be valid JSON: {model_config_path}") from exc
-    if not isinstance(payload, dict):
-        raise ValueError("model_config_file must contain a JSON object")
-    unknown = sorted(set(payload) - OPENVIKING_MODEL_SECTIONS)
-    if unknown:
-        raise ValueError(
-            "model_config_file may only contain top-level sections: "
-            f"{', '.join(sorted(OPENVIKING_MODEL_SECTIONS))}; found {', '.join(unknown)}"
-        )
-    if not any(section in payload for section in OPENVIKING_MODEL_SECTIONS):
-        raise ValueError("model_config_file must contain at least one of embedding, vlm, bot")
-    return payload
-
-
-def _existing_root_api_key(path: Path) -> str | None:
-    if not path.exists():
-        return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return None
-    root_api_key = (
-        payload.get("server", {}).get("root_api_key") if isinstance(payload, dict) else None
-    )
-    return root_api_key if isinstance(root_api_key, str) and root_api_key else None
-
-
-def _render_openviking_cli_config(service: LockedServiceSpec, openviking_config: str) -> None:
-    try:
-        parsed = json.loads(openviking_config)
-    except json.JSONDecodeError:
-        return
-    root_api_key = parsed.get("server", {}).get("root_api_key")
-    if not root_api_key:
-        return
-    cli_config = {
-        "url": f"http://127.0.0.1:{service.backend_port}",
-        "api_key": root_api_key,
-        "account": "default",
-        "user": "default",
-    }
-    cli_config_file = (
-        service.openviking.cli_config_file or service.openviking.config_file.with_name("ovcli.conf")
-    )
-    cli_config_file.write_text(
-        json.dumps(cli_config, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
-
-
-def _render_openviking_cli_wrapper(service: LockedServiceSpec) -> None:
-    wrapper_dir = service.config_dir / "bin"
-    wrapper_dir.mkdir(parents=True, exist_ok=True)
-    wrapper = wrapper_dir / "ov"
-    wrapper.write_text(
-        f"""#!/bin/sh
-set -eu
-if [ "${{1:-}}" = "admin" ]; then
-  exec /app/.venv/bin/ov "$@"
-fi
-
-root_config="/tmp/ov-mgn-root-ovcli.conf"
-user_config="/tmp/ov-mgn-user-ovcli.conf"
-python - <<'PY' "$root_config" 2>/dev/null || true
-import json
-import sys
-try:
-    config = json.load(open('/app/config/openviking.conf'))
-    json.dump(
-        {{
-            'url': 'http://127.0.0.1:{service.backend_port}',
-            'api_key': config['server']['root_api_key'],
-            'account': 'default',
-            'user': 'default',
-        }},
-        open(sys.argv[1], 'w'),
-    )
-except Exception:
-    pass
-PY
-
-api_key=""
-if [ -s "$root_config" ]; then
-  bootstrap_json="$(OPENVIKING_CLI_CONFIG_FILE="$root_config" \\
-    /app/.venv/bin/ov admin regenerate-key default default -o json 2>/dev/null || true)"
-  api_key="$(BOOTSTRAP_JSON="$bootstrap_json" python - <<'PY' 2>/dev/null || true
-import json
-import os
-try:
-    payload = json.loads(os.environ.get('BOOTSTRAP_JSON', ''))
-    print(payload.get('result', {{}}).get('user_key', ''))
-except Exception:
-    pass
-PY
-)"
-fi
-
-if [ -n "$api_key" ]; then
-  python - <<'PY' "$user_config" "$api_key" 2>/dev/null || true
-import json
-import sys
-json.dump(
-    {{
-        'url': 'http://127.0.0.1:{service.backend_port}',
-        'api_key': sys.argv[2],
-        'account': 'default',
-        'user': 'default',
-    }},
-    open(sys.argv[1], 'w'),
-)
-PY
-  export OPENVIKING_CLI_CONFIG_FILE="$user_config"
-  export VIKINGBOT_API_KEY="$api_key"
-fi
-export VIKINGBOT_ENDPOINT="${{VIKINGBOT_ENDPOINT:-http://127.0.0.1:{service.backend_port}/bot/v1}}"
-exec /app/.venv/bin/ov "$@"
-""",
-        encoding="utf-8",
-    )
-    wrapper.chmod(0o755)
-
-
-def _merged_runtime_env(secret_env_file: Path | None, values: dict[str, str]) -> str:
-    lines: list[str] = []
-    if secret_env_file:
-        secret_path = secret_env_file.expanduser()
-        if secret_path.exists():
-            lines.extend(
-                line
-                for line in secret_path.read_text(encoding="utf-8").splitlines()
-                if _env_line_key(line) not in OPENVIKING_MANAGED_ENV_KEYS
-            )
-            lines.append("")
-    lines.extend(f"{key}={value}" for key, value in sorted(values.items()))
-    return "\n".join(lines).rstrip() + "\n"
-
-
-def _env_line_key(line: str) -> str | None:
-    stripped = line.strip()
-    if not stripped or stripped.startswith("#") or "=" not in stripped:
-        return None
-    return stripped.split("=", 1)[0].strip()
+    _promote_data_dir(service)
 
 
 def _write_json_read_only(model: BaseModel, path: Path) -> Path:

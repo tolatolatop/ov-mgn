@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ov_mgn.logging import get_logger
 from ov_mgn.server_config import (
     OPENVIKING_CONFIG_FILE,
     LockedServerConfig,
@@ -23,6 +24,8 @@ LABEL_GATEWAY = "ov-mgn.gateway"
 GATEWAY_INFO_PATH = "/__ov-mgn/"
 GATEWAY_INFO_JSON_PATH = "/__ov-mgn/services.json"
 
+logger = get_logger(__name__)
+
 
 @dataclass
 class DockerClient:
@@ -30,11 +33,20 @@ class DockerClient:
 
     def ensure_gateway_network(self, network_name: str) -> list[str]:
         command = ["docker", "network", "create", network_name]
+        logger.debug("docker ensure network network=%s dry_run=%s", network_name, self.dry_run)
         self._run_allow_exists(command)
         return command
 
     def run_backend(self, service_name: str, service: LockedServiceSpec) -> list[str]:
         command = build_run_command(service_name, service, role="backend")
+        logger.debug(
+            "docker run backend service=%s container=%s network=%s image=%s dry_run=%s",
+            service_name,
+            service.release_container_name,
+            service.network_name,
+            service.image,
+            self.dry_run,
+        )
         self._run(command)
         return command
 
@@ -50,6 +62,13 @@ class DockerClient:
         docker_command = ["docker", "exec"]
         for key, value in sorted((env or {}).items()):
             docker_command.extend(["-e", f"{key}={value}"])
+        logger.debug(
+            "docker exec container=%s command=%s env_keys=%s dry_run=%s",
+            container_name,
+            command[:3],
+            sorted((env or {}).keys()),
+            self.dry_run,
+        )
         return self._run(
             [*docker_command, container_name, *command],
             capture_output=capture_output,
@@ -59,6 +78,7 @@ class DockerClient:
     def wait_healthy(self, container_name: str, *, timeout_seconds: int = 60) -> None:
         if self.dry_run:
             return
+        logger.debug("docker wait healthy container=%s timeout=%s", container_name, timeout_seconds)
         deadline = time.monotonic() + timeout_seconds
         last_status = "unknown"
         while time.monotonic() < deadline:
@@ -75,6 +95,9 @@ class DockerClient:
             )
             if result and result.returncode == 0:
                 last_status = result.stdout.strip()
+                logger.debug(
+                    "docker health status container=%s status=%s", container_name, last_status
+                )
                 if last_status in {"healthy", "running"}:
                     return
             time.sleep(2)
@@ -101,6 +124,9 @@ class DockerClient:
         )
         if existing and existing.stdout.strip():
             command = ["docker", "start", container_name]
+            logger.debug(
+                "docker start gateway container=%s dry_run=%s", container_name, self.dry_run
+            )
             self._run(command, allow_failure=True)
             return command
         command = build_gateway_run_command(
@@ -111,15 +137,28 @@ class DockerClient:
             network_name=network_name,
             config_path=config_path,
         )
+        logger.debug(
+            "docker run gateway container=%s network=%s image=%s bind=%s:%s dry_run=%s",
+            container_name,
+            network_name,
+            image,
+            host,
+            port,
+            self.dry_run,
+        )
         self._run(command)
         return command
 
     def reload_gateway(self, container_name: str) -> list[str]:
         command = ["docker", "exec", container_name, "nginx", "-s", "reload"]
+        logger.debug("docker reload gateway container=%s dry_run=%s", container_name, self.dry_run)
         self._run(command)
         return command
 
     def stop_remove(self, container_name: str) -> None:
+        logger.debug(
+            "docker stop/remove check container=%s dry_run=%s", container_name, self.dry_run
+        )
         existing = self._run(
             ["docker", "ps", "-a", "-q", "--filter", f"name=^{container_name}$"],
             capture_output=True,
@@ -127,6 +166,7 @@ class DockerClient:
         )
         if existing is None or not existing.stdout.strip():
             return
+        logger.debug("docker remove container=%s dry_run=%s", container_name, self.dry_run)
         self._run(["docker", "rm", "-f", container_name], allow_failure=True)
 
     def inspect_status(self) -> str:
@@ -140,6 +180,7 @@ class DockerClient:
             "{{.Names}}\t{{.Status}}\t{{.Ports}}",
         ]
         result = self._run(command, capture_output=True, allow_failure=True)
+        logger.debug("docker inspect status complete dry_run=%s", self.dry_run)
         return "" if result is None else result.stdout
 
     def inspect_containers(self) -> list[dict[str, Any]]:
@@ -185,6 +226,7 @@ class DockerClient:
                     "stable_port": _parse_int_or_string(stable_port),
                 }
             )
+        logger.debug("docker inspected containers count=%d", len(containers))
         return containers
 
     def inspect_gateway_container(
@@ -207,13 +249,17 @@ class DockerClient:
             if len(fields) != 3 or fields[0] != container_name:
                 continue
             name, status, ports = fields
-            return {
+            payload = {
                 "name": name,
                 "status": status,
                 "running": status.startswith("Up "),
                 "ports": ports,
                 "role": "gateway",
             }
+            logger.debug(
+                "docker inspected gateway container=%s running=%s", name, payload["running"]
+            )
+            return payload
         return None
 
     def container_running(self, container_name: str) -> bool:
@@ -227,7 +273,9 @@ class DockerClient:
             "status=running",
         ]
         result = self._run(command, capture_output=True, allow_failure=True)
-        return result is None or bool(result.stdout.strip())
+        running = result is None or bool(result.stdout.strip())
+        logger.debug("docker container running container=%s running=%s", container_name, running)
+        return running
 
     def _run_allow_exists(self, command: list[str]) -> None:
         result = self._run(command, capture_output=True, allow_failure=True)
@@ -244,7 +292,9 @@ class DockerClient:
         allow_failure: bool = False,
     ) -> subprocess.CompletedProcess[str] | None:
         if self.dry_run:
+            logger.debug("docker dry-run command=%s", _summarize_docker_command(command))
             return None
+        logger.debug("docker run command=%s", _summarize_docker_command(command))
         result = subprocess.run(command, capture_output=capture_output, text=True)
         if not allow_failure:
             result.check_returncode()
@@ -579,3 +629,44 @@ def _parse_int_or_string(value: str) -> int | str:
         return int(value)
     except ValueError:
         return value
+
+
+def _summarize_docker_command(command: list[str]) -> str:
+    if len(command) < 2:
+        return " ".join(command)
+    if command[:3] == ["docker", "network", "create"] and len(command) >= 4:
+        return f"docker network create {command[3]}"
+    if command[:2] == ["docker", "run"]:
+        name = _option_value(command, "--name") or "<unnamed>"
+        network = _option_value(command, "--network") or "<default>"
+        image = command[-1] if command else "<unknown>"
+        return f"docker run name={name} network={network} image={image}"
+    if command[:2] == ["docker", "exec"]:
+        container_index = 2
+        index = 2
+        while index < len(command) and command[index] == "-e":
+            index += 2
+            container_index = index
+        container = command[container_index] if container_index < len(command) else "<unknown>"
+        subcommand = command[container_index + 1 : container_index + 4]
+        return f"docker exec container={container} command={' '.join(subcommand)}"
+    if command[:2] == ["docker", "rm"] and command[-1:]:
+        return f"docker rm {command[-1]}"
+    if command[:2] == ["docker", "start"] and command[-1:]:
+        return f"docker start {command[-1]}"
+    if command[:2] == ["docker", "ps"]:
+        return "docker ps"
+    if command[:2] == ["docker", "inspect"]:
+        return f"docker inspect {command[-1]}"
+    return " ".join(command[:3])
+
+
+def _option_value(command: list[str], option: str) -> str | None:
+    try:
+        index = command.index(option)
+    except ValueError:
+        return None
+    value_index = index + 1
+    if value_index >= len(command):
+        return None
+    return command[value_index]

@@ -383,6 +383,163 @@ def test_model_json_update_requires_new_candidate_and_promote(tmp_path) -> None:
     assert final_state.online_release_id == second_service.release_id
 
 
+def test_branch_service_config_copies_parent_data_on_first_up(tmp_path) -> None:
+    workspace = tmp_path / "workspace"
+    source_dir = workspace / "openviking-alpha"
+    model_config_file = workspace / "model.json"
+    config_path = workspace / "server.json"
+    lock_path = workspace / "server.json.lock"
+    release_path = workspace / "release.json.lock"
+    state_path = workspace / "state.json.lock"
+    workspace.mkdir()
+    source_dir.mkdir()
+    (source_dir / "app.py").write_text("VERSION = 'branch-source'\n", encoding="utf-8")
+    _write_model_config(model_config_file, api_key="model-secret", model="embedding")
+    config_path.write_text(
+        json.dumps(
+            {
+                "defaults": {
+                    "port_range": [31000, 31010],
+                    "image": "example/openviking:test",
+                    "data_root": str(workspace / "data"),
+                    "openviking": {"model_config_file": str(model_config_file)},
+                },
+                "services": {
+                    "alpha": {
+                        "source": {"type": "local", "path": str(source_dir)},
+                        "openviking": {"vars": {"profile": "alpha"}},
+                    }
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+
+    plan_source = runner.invoke(
+        main, ["plan", "--config-path", str(config_path), "--lock-path", str(lock_path)]
+    )
+    assert plan_source.exit_code == 0, plan_source.output
+    source_service = load_locked_config(lock_path).services["alpha"]
+    up_source = runner.invoke(
+        main,
+        [
+            "up",
+            "alpha",
+            "--lock-path",
+            str(lock_path),
+            "--state-path",
+            str(state_path),
+            "--dry-run",
+        ],
+    )
+    assert up_source.exit_code == 0, up_source.output
+    source_service.release_data_dir.mkdir(parents=True, exist_ok=True)
+    (source_service.release_data_dir / "kb.sqlite").write_text("source-data", encoding="utf-8")
+    promote_source = runner.invoke(
+        main,
+        [
+            "promote",
+            "alpha",
+            "--lock-path",
+            str(lock_path),
+            "--release-path",
+            str(release_path),
+            "--state-path",
+            str(state_path),
+            "--dry-run",
+        ],
+    )
+    assert promote_source.exit_code == 0, promote_source.output
+
+    branch = runner.invoke(
+        main,
+        [
+            "branch",
+            "--config-path",
+            str(config_path),
+            "--route-path",
+            "/beta/",
+            "alpha",
+            "beta",
+        ],
+    )
+    assert branch.exit_code == 0, branch.output
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    assert payload["services"]["beta"]["branch"]["parent_service"] == "alpha"
+
+    plan_branch = runner.invoke(
+        main, ["plan", "--config-path", str(config_path), "--lock-path", str(lock_path)]
+    )
+    assert plan_branch.exit_code == 0, plan_branch.output
+    branch_service = load_locked_config(lock_path).services["beta"]
+    up_branch = runner.invoke(
+        main,
+        [
+            "up",
+            "beta",
+            "--lock-path",
+            str(lock_path),
+            "--release-path",
+            str(release_path),
+            "--state-path",
+            str(state_path),
+            "--dry-run",
+        ],
+    )
+    assert up_branch.exit_code == 0, up_branch.output
+    assert (branch_service.release_data_dir / "kb.sqlite").read_text(encoding="utf-8") == (
+        "source-data"
+    )
+
+    (source_service.release_data_dir / "kb.sqlite").write_text("changed-source", encoding="utf-8")
+    assert (branch_service.release_data_dir / "kb.sqlite").read_text(encoding="utf-8") == (
+        "source-data"
+    )
+
+    promote_branch = runner.invoke(
+        main,
+        [
+            "promote",
+            "beta",
+            "--lock-path",
+            str(lock_path),
+            "--release-path",
+            str(release_path),
+            "--state-path",
+            str(state_path),
+            "--dry-run",
+        ],
+    )
+    assert promote_branch.exit_code == 0, promote_branch.output
+    release = load_release_lock(release_path).services
+    state = load_state(state_path).services
+    assert release["alpha"].release_id == source_service.release_id
+    assert release["beta"].release_id == branch_service.release_id
+    assert state["alpha"].online_release_id == source_service.release_id
+    assert state["beta"].online_release_id == branch_service.release_id
+
+    status = runner.invoke(
+        main,
+        [
+            "status",
+            "--config-path",
+            str(config_path),
+            "--lock-path",
+            str(lock_path),
+            "--release-path",
+            str(release_path),
+            "--state-path",
+            str(state_path),
+            "--no-docker",
+        ],
+    )
+    assert status.exit_code == 0, status.output
+    summary = json.loads(status.output)["services_summary"]["beta"]
+    assert summary["internal"]["branch"]["parent_service"] == "alpha"
+
+
 def _write_model_config(path, *, api_key: str, model: str) -> None:
     path.write_text(
         json.dumps(

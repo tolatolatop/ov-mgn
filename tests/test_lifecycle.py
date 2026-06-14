@@ -2,6 +2,8 @@ import json
 import subprocess
 from datetime import UTC, datetime
 
+import pytest
+
 from ov_mgn.lifecycle import down_service, promote_service, switch_service, up_service
 from ov_mgn.server_config import (
     ReleaseLock,
@@ -288,6 +290,62 @@ def test_gateway_up_regenerates_key_when_user_already_exists(tmp_path) -> None:
     assert ovcli["api_key"] == "user-key-from-regenerate"
 
 
+def test_branch_service_first_up_copies_parent_online_data(tmp_path) -> None:
+    locked = render_locked_config(_branch_config(tmp_path))
+    parent = locked.services["alpha"]
+    branch = locked.services["beta"]
+    parent.release_data_dir.mkdir(parents=True)
+    (parent.release_data_dir / "kb.sqlite").write_text("parent-data", encoding="utf-8")
+    lock_path = write_lock_file(locked, tmp_path / "server.json.lock")
+    release_path = write_release_lock(
+        ReleaseLock(updated_at=_now(), services={"alpha": parent}),
+        tmp_path / "release.json.lock",
+    )
+    state_path = write_state(
+        RuntimeState(
+            updated_at=_now(),
+            services={"alpha": RuntimeServiceState(online_release_id=parent.release_id)},
+        ),
+        tmp_path / "state.json.lock",
+    )
+    docker = FakeGatewayDocker()
+
+    release_id, _port = up_service(
+        "beta",
+        lock_path=lock_path,
+        release_path=release_path,
+        state_path=state_path,
+        docker=docker,
+    )
+
+    state = load_state(state_path)
+    assert release_id == branch.release_id
+    assert docker.backend_runs == [f"beta:{branch.release_id}"]
+    assert (branch.release_data_dir / "kb.sqlite").read_text(encoding="utf-8") == "parent-data"
+    assert state.services["alpha"].online_release_id == parent.release_id
+    assert state.services["beta"].candidate_release_id == branch.release_id
+
+    (parent.release_data_dir / "kb.sqlite").write_text("changed-parent", encoding="utf-8")
+    assert (branch.release_data_dir / "kb.sqlite").read_text(encoding="utf-8") == "parent-data"
+
+
+def test_branch_service_up_requires_parent_online_release(tmp_path) -> None:
+    locked = render_locked_config(_branch_config(tmp_path))
+    branch = locked.services["beta"]
+    lock_path = write_lock_file(locked, tmp_path / "server.json.lock")
+
+    with pytest.raises(ValueError, match="requires parent service alpha to have an online release"):
+        up_service(
+            "beta",
+            lock_path=lock_path,
+            release_path=tmp_path / "release.json.lock",
+            state_path=tmp_path / "state.json.lock",
+            docker=FakeGatewayDocker(),
+        )
+
+    assert not branch.release_data_dir.exists()
+
+
 def test_gateway_promote_only_switches_route_and_state(tmp_path) -> None:
     locked = render_locked_config(_gateway_config(tmp_path))
     service = locked.services["alpha"]
@@ -379,3 +437,36 @@ def _gateway_config(tmp_path, template_path=None, secret_env_file=None) -> UserS
     if template_path:
         service["openviking"] = {"template_path": str(template_path)}
     return UserServerConfig.model_validate({"defaults": defaults, "services": {"alpha": service}})
+
+
+def _branch_config(tmp_path) -> UserServerConfig:
+    source = tmp_path / "source"
+    source.mkdir(exist_ok=True)
+    model_config = tmp_path / "model.json"
+    model_config.write_text(
+        json.dumps({"embedding": {"dense": {"provider": "openai", "api_key": "secret"}}}),
+        encoding="utf-8",
+    )
+    return UserServerConfig.model_validate(
+        {
+            "defaults": {
+                "data_root": str(tmp_path / "data"),
+                "openviking": {"model_config_file": str(model_config)},
+                "gateway": {"enabled": True, "port": 18080},
+            },
+            "services": {
+                "alpha": {
+                    "stable_port": 18080,
+                    "source": {"type": "local", "path": str(source)},
+                },
+                "beta": {
+                    "route_path": "/beta/",
+                    "source": {"type": "local", "path": str(source)},
+                    "branch": {
+                        "parent_service": "alpha",
+                        "declared_at": "2026-06-14T00:00:00Z",
+                    },
+                },
+            },
+        }
+    )

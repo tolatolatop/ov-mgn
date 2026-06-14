@@ -1,4 +1,5 @@
 import json
+import shutil
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -34,13 +35,20 @@ def up_service(
 
     materialize_service(service)
     client = docker or DockerClient()
-    promote_data_dir(service)
+    release = load_release_lock(release_path)
+    state = load_state(state_path)
+    _prepare_release_data(
+        service_name=service_name,
+        service=service,
+        locked=locked,
+        release=release,
+        state=state,
+    )
     client.ensure_gateway_network(locked.gateway.network_name)
     client.run_backend(service_name, service)
     service = _bootstrap_openviking_user(service_name, service, client)
     locked.services[service_name] = service
 
-    state = load_state(state_path)
     state.updated_at = datetime.now(UTC)
     state.services[service_name] = RuntimeServiceState(
         candidate_release_id=service.release_id,
@@ -49,7 +57,6 @@ def up_service(
         stable_port=service.stable_port,
     )
     write_state(state, state_path)
-    release = load_release_lock(release_path)
     _reload_gateway(locked=locked, release=release, state=state, client=client)
     return service.release_id, service.candidate_port
 
@@ -191,6 +198,71 @@ def _reload_gateway(
         config_path=locked.gateway_config_path,
     )
     client.reload_gateway(locked.gateway_container_name)
+
+
+def _prepare_release_data(
+    *,
+    service_name: str,
+    service: LockedServiceSpec,
+    locked: LockedServerConfig,
+    release: ReleaseLock,
+    state,
+) -> None:
+    if service.branch and _branch_needs_initial_data_copy(service_name, release, state):
+        _copy_branch_parent_data(
+            service_name=service_name, service=service, locked=locked, release=release, state=state
+        )
+        return
+    promote_data_dir(service)
+
+
+def _branch_needs_initial_data_copy(
+    service_name: str,
+    release: ReleaseLock,
+    state,
+) -> bool:
+    runtime = state.services.get(service_name)
+    return service_name not in release.services and (
+        runtime is None
+        or (runtime.candidate_release_id is None and runtime.online_release_id is None)
+    )
+
+
+def _copy_branch_parent_data(
+    *,
+    service_name: str,
+    service: LockedServiceSpec,
+    locked: LockedServerConfig,
+    release: ReleaseLock,
+    state,
+) -> None:
+    if service.branch is None:
+        return
+    parent_service_name = service.branch.parent_service
+    parent_runtime = state.services.get(parent_service_name)
+    if parent_runtime is None or not parent_runtime.online_release_id:
+        raise ValueError(
+            f"branch service {service_name} requires parent service "
+            f"{parent_service_name} to have an online release"
+        )
+    parent_release_id = parent_runtime.online_release_id
+    if parent_service_name not in release.services:
+        raise ValueError(
+            f"branch parent service {parent_service_name} is missing from release lock"
+        )
+    parent_service = release.services[parent_service_name]
+    if parent_service.release_id != parent_release_id:
+        raise ValueError(
+            f"branch parent service {parent_service_name} release lock does not match "
+            f"online release {parent_release_id}"
+        )
+    parent_data_dir = parent_service.release_data_dir
+    if not parent_data_dir.exists() or not parent_data_dir.is_dir():
+        raise ValueError(f"branch parent data directory does not exist: {parent_data_dir}")
+    if service.release_data_dir.exists():
+        raise ValueError(f"branch target data directory already exists: {service.release_data_dir}")
+    service.release_data_dir.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(parent_data_dir, service.release_data_dir)
 
 
 def _bootstrap_openviking_user(

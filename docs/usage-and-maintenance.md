@@ -233,7 +233,51 @@ uv run ov-mgn promote alpha
 `up` 会把本地源码复制进 release code 目录。复制完成后，后续对原始源码目录的修改
 不会影响已经启动的 release。
 
-### 2.4 停止服务
+### 2.4 创建分支服务
+
+`branch` 命令只编辑 `server.json`，用于声明一个新的服务从已有服务分支而来。它不复制
+数据、不启动容器、不修改 lock/state/release。真实数据复制发生在目标服务第一次
+`up` 时，复制源服务当时的 online release data。
+
+```bash
+uv run ov-mgn branch alpha alpha-exp --route-path /alpha-exp/
+```
+
+该命令会复制 `alpha` 的服务配置到 `alpha-exp`，并写入：
+
+```json
+{
+  "branch": {
+    "parent_service": "alpha",
+    "declared_at": "2026-06-15T..."
+  }
+}
+```
+
+确认 `server.json` 后，可以提交到配置仓库。运维服务器按普通发布流程创建分支服务：
+
+```bash
+uv run ov-mgn config-file validate
+uv run ov-mgn plan
+uv run ov-mgn up alpha-exp
+```
+
+检查 candidate：
+
+```text
+http://127.0.0.1:18080/alpha-exp/__candidate/
+```
+
+确认后上线：
+
+```bash
+uv run ov-mgn promote alpha-exp
+```
+
+上线后 `alpha` 和 `alpha-exp` 是完全独立的 OpenViking 服务。要对哪个分支做增量解析，
+就进入哪个服务的容器执行原生 `ov add-resource`。
+
+### 2.5 停止服务
 
 ```bash
 uv run ov-mgn down alpha
@@ -242,7 +286,7 @@ uv run ov-mgn down alpha
 `down` 会停止已知 backend 容器并移除网关路由；不会删除 `server.json`、源码、
 release 数据目录或 lock 文件。
 
-### 2.5 回滚或切换旧 release
+### 2.6 回滚或切换旧 release
 
 如果旧 backend 容器仍在运行，可以切回旧 release：
 
@@ -269,6 +313,8 @@ uv run ov-mgn status
 - `services.<name>.source`：源码来源，支持 `local` 或 `git`。
 - `services.<name>.openviking.env`：附加容器环境变量。
 - `services.<name>.openviking.vars`：写入运行元信息的变量，例如 `profile`。
+- `services.<name>.branch`：可选分支声明，只记录父服务和声明时间；目标服务第一次
+  `up` 时会从父服务当时的 online release data 复制初始数据。
 
 ### 3.2 受 ov-mgn 管理的配置
 
@@ -440,6 +486,7 @@ uv run ov-mgn server-config paths
 | --- | --- | --- |
 | `config-file show/set/unset` | `server.json` | `server.json` |
 | `config-file validate` | `server.json`、`model.json` | 无 |
+| `branch SOURCE TARGET` | `server.json` | `server.json` |
 | `plan` | `server.json`、`model.json` | `server.json.lock` |
 | `up SERVICE` | `server.json.lock`、`model.json`、`release.json.lock`、`state.json.lock` | release 配置目录、backend 容器、gateway 配置、`state.json.lock` |
 | `promote SERVICE` | `server.json.lock`、`release.json.lock`、`state.json.lock` | gateway 路由、`release.json.lock`、`state.json.lock` |
@@ -461,6 +508,30 @@ uv run ov-mgn promote alpha
 ```
 
 `up` 会为新 release 重新生成 `openviking.conf`；`promote` 才会把稳定路由切过去。
+
+### Q: branch 后为什么还没有复制数据？
+
+`branch` 只声明配置，方便把 `server.json` 提交到配置仓库。真实复制发生在目标服务第一
+次 `up` 时：
+
+```bash
+uv run ov-mgn plan
+uv run ov-mgn up alpha-exp
+```
+
+`up alpha-exp` 会读取 `alpha-exp.branch.parent_service`，找到父服务当前 online release，
+并在线复制它的 `data` 目录作为目标服务的初始数据。父服务必须已经 online；否则
+`up` 会失败。
+
+### Q: 分支后源服务和目标服务还会同步吗？
+
+不会。分支关系只用于目标服务首次 `up` 时复制初始数据。之后源服务和目标服务完全
+独立。要对某个分支做增量解析，就进入该分支服务的容器执行原生 OpenViking 命令，
+例如：
+
+```bash
+docker exec -it <alpha-exp-container> ov add-resource /app/code --to viking://resources/alpha-exp-code
+```
 
 ### Q: `config-file validate` 失败怎么办？
 

@@ -23,6 +23,7 @@ def test_configured_service_summary_has_internal_and_external_layers(tmp_path) -
         "released_release_id": None,
         "state_candidate_release_id": None,
         "state_online_release_id": None,
+        "branch": None,
     }
     assert summary["external"] == {
         "docker_checked": False,
@@ -191,6 +192,17 @@ def test_release_lock_without_runtime_state_is_planned_not_online(tmp_path) -> N
     assert summary["internal"]["released_release_id"] == service.release_id
 
 
+def test_branch_lineage_is_reported_in_internal_summary(tmp_path) -> None:
+    config = _branch_config(tmp_path)
+    locked = render_locked_config(config)
+
+    summary = _summary(config=config, lock=locked)["beta"]
+
+    assert summary["stage"] == "planned"
+    assert summary["internal"]["branch"]["parent_service"] == "alpha"
+    assert summary["internal"]["branch"]["declared_at"] == "2026-06-14T00:00:00Z"
+
+
 def test_gateway_status_checks_backend_gateway_and_nginx_config(tmp_path) -> None:
     config = _gateway_config(tmp_path)
     locked = render_locked_config(config)
@@ -333,6 +345,33 @@ def _gateway_config(tmp_path) -> UserServerConfig:
                     "stable_port": 18080,
                     "source": {"type": "local", "path": str(source)},
                 }
+            },
+        }
+    )
+
+
+def _branch_config(tmp_path) -> UserServerConfig:
+    source = tmp_path / "source"
+    source.mkdir(exist_ok=True)
+    return UserServerConfig.model_validate(
+        {
+            "defaults": {
+                "data_root": str(tmp_path / "data"),
+                "port_range": [31000, 31999],
+            },
+            "services": {
+                "alpha": {
+                    "stable_port": 18080,
+                    "source": {"type": "local", "path": str(source)},
+                },
+                "beta": {
+                    "route_path": "/beta/",
+                    "source": {"type": "local", "path": str(source)},
+                    "branch": {
+                        "parent_service": "alpha",
+                        "declared_at": "2026-06-14T00:00:00Z",
+                    },
+                },
             },
         }
     )

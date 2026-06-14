@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +12,7 @@ from ov_mgn.docker import DockerClient
 from ov_mgn.lifecycle import down_service, promote_service, switch_service, up_service
 from ov_mgn.logging import configure_logging, get_logger
 from ov_mgn.server_config import (
+    BranchSpec,
     UserServerConfig,
     get_release_lock_path,
     get_server_config_path,
@@ -21,6 +23,7 @@ from ov_mgn.server_config import (
     load_state,
     load_user_server_config,
     render_locked_config,
+    save_user_server_config,
     save_user_server_config_data,
     validate_openviking_model_config,
     write_lock_file,
@@ -194,6 +197,49 @@ def down(
         docker=DockerClient(dry_run=dry_run),
     )
     click.echo(f"{service} stopped")
+
+
+@main.command("branch")
+@click.argument("source_service")
+@click.argument("target_service")
+@click.option("--route-path", type=str, default=None, help="Route path for the target service.")
+@click.option(
+    "--config-path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Path to server.json. Defaults to ~/.ov_mgn/server.json.",
+)
+def branch_service_config(
+    source_service: str,
+    target_service: str,
+    route_path: str | None,
+    config_path: Path | None,
+) -> None:
+    """Add TARGET_SERVICE as a config branch of SOURCE_SERVICE."""
+    config = _load_user_config_or_fail(config_path)
+    if source_service not in config.services:
+        raise click.ClickException(f"unknown source service: {source_service}")
+    if target_service in config.services:
+        raise click.ClickException(f"target service already exists: {target_service}")
+    source = config.services[source_service]
+    target_vars = {**source.openviking.vars, "profile": target_service}
+    target_openviking = source.openviking.model_copy(update={"vars": target_vars})
+    target = source.model_copy(
+        update={
+            "route_path": route_path or f"/{target_service}/",
+            "openviking": target_openviking,
+            "branch": BranchSpec(
+                parent_service=source_service,
+                declared_at=datetime.now(UTC),
+            ),
+        }
+    )
+    updated = config.model_copy(update={"services": {**config.services, target_service: target}})
+    try:
+        save_user_server_config(updated, config_path)
+    except (OSError, ValidationError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"added branch service {target_service} from {source_service}")
 
 
 @main.command("status")

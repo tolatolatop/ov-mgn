@@ -137,6 +137,11 @@ def _summarize_service_status(
             "released_release_id": released.release_id if released else None,
             "state_candidate_release_id": candidate_release_id,
             "state_online_release_id": online_release_id,
+            "branch": (
+                (locked.branch if locked else configured.branch).model_dump(mode="json")
+                if (locked and locked.branch) or (configured and configured.branch)
+                else None
+            ),
         },
         "external": external,
         "gateway": _gateway_summary(

@@ -13,6 +13,7 @@ uv run ov-mgn --help
 uv run ov-mgn plan
 uv run ov-mgn up alpha
 uv run ov-mgn promote alpha
+uv run ov-mgn branch alpha alpha-exp --route-path /alpha-exp/
 uv run ov-mgn switch alpha alpha-20260613T120000-abcd123
 uv run ov-mgn status
 uv run pytest
@@ -30,6 +31,9 @@ The main lifecycle commands are:
   expose it at the candidate preview route.
 - `promote SERVICE`: point the stable gateway route at the candidate backend and
   record the promoted release.
+- `branch SOURCE_SERVICE TARGET_SERVICE`: add a new service config branch in
+  `server.json`; the first `up TARGET_SERVICE` copies data from the source
+  service's current online release.
 - `switch SERVICE RELEASE_ID`: point the stable route at an already running
   backend release.
 - `down SERVICE`: remove the service routes and stop known backend containers.

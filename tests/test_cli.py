@@ -766,6 +766,63 @@ def test_config_file_set_rejects_duplicate_route_path_without_writing(tmp_path) 
     assert config_path.read_text(encoding="utf-8") == original
 
 
+def test_branch_command_adds_config_only_branch_service(tmp_path) -> None:
+    config_path = tmp_path / "server.json"
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    _write_config(config_path, source_dir)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "branch",
+            "--config-path",
+            str(config_path),
+            "--route-path",
+            "/beta-custom/",
+            "alpha",
+            "beta",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.output.strip() == "added branch service beta from alpha"
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    beta = payload["services"]["beta"]
+    assert beta["route_path"] == "/beta-custom/"
+    assert beta["source"] == payload["services"]["alpha"]["source"]
+    assert beta["image"] == "example/openviking:alpha"
+    assert beta["openviking"]["env"] == {"TZ": "UTC"}
+    assert beta["openviking"]["vars"]["profile"] == "beta"
+    assert beta["branch"]["parent_service"] == "alpha"
+    assert "declared_at" in beta["branch"]
+    assert "release_id" not in beta["branch"]
+
+
+def test_branch_command_rejects_missing_source_or_existing_target_without_writing(tmp_path) -> None:
+    config_path = tmp_path / "server.json"
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    _write_config(config_path, source_dir, include_beta=True)
+    original = config_path.read_text(encoding="utf-8")
+    runner = CliRunner()
+
+    missing_source = runner.invoke(
+        main,
+        ["branch", "--config-path", str(config_path), "missing", "gamma"],
+    )
+    existing_target = runner.invoke(
+        main,
+        ["branch", "--config-path", str(config_path), "alpha", "beta"],
+    )
+
+    assert missing_source.exit_code != 0
+    assert "unknown source service: missing" in missing_source.output
+    assert existing_target.exit_code != 0
+    assert "target service already exists: beta" in existing_target.output
+    assert config_path.read_text(encoding="utf-8") == original
+
+
 def test_config_file_unset_removes_optional_fields_and_map_keys(tmp_path) -> None:
     config_path = tmp_path / "server.json"
     source_dir = tmp_path / "source"

@@ -359,6 +359,38 @@ def test_user_config_rejects_missing_local_source(tmp_path) -> None:
         )
 
 
+def test_user_config_rejects_invalid_branch_parent() -> None:
+    with pytest.raises(ValidationError, match="parent_service missing"):
+        UserServerConfig.model_validate(
+            {
+                "services": {
+                    "beta": {
+                        "source": {"type": "local", "path": "."},
+                        "branch": {
+                            "parent_service": "missing",
+                            "declared_at": "2026-06-14T00:00:00Z",
+                        },
+                    },
+                }
+            }
+        )
+
+    with pytest.raises(ValidationError, match="cannot branch from itself"):
+        UserServerConfig.model_validate(
+            {
+                "services": {
+                    "alpha": {
+                        "source": {"type": "local", "path": "."},
+                        "branch": {
+                            "parent_service": "alpha",
+                            "declared_at": "2026-06-14T00:00:00Z",
+                        },
+                    },
+                }
+            }
+        )
+
+
 def test_openviking_validation_rejects_template_path(tmp_path) -> None:
     template = tmp_path / "openviking.conf"
     template.write_text("{}", encoding="utf-8")

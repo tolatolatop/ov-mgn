@@ -108,6 +108,20 @@ class OpenVikingDefaults(BaseModel):
     model_config_file: Path = Field(default=Path("~/.ov_mgn/model.json"))
 
 
+class BranchSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    parent_service: str
+    declared_at: datetime
+
+    @field_validator("parent_service")
+    @classmethod
+    def validate_parent_service(cls, value: str) -> str:
+        if not SERVICE_NAME_PATTERN.fullmatch(value):
+            raise ValueError("branch parent_service must be a valid service name")
+        return value
+
+
 class ServiceSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -118,6 +132,7 @@ class ServiceSpec(BaseModel):
     image: str | None = Field(default=None)
     source: SourceSpec
     openviking: OpenVikingSpec = Field(default_factory=OpenVikingSpec)
+    branch: BranchSpec | None = Field(default=None)
 
     @field_validator("route_path")
     @classmethod
@@ -170,6 +185,14 @@ class UserServerConfig(BaseModel):
             if route_path in route_paths:
                 other = route_paths[route_path]
                 raise ValueError(f"route_path {route_path} is used by both {other} and {name}")
+            if service.branch:
+                if service.branch.parent_service == name:
+                    raise ValueError(f"service {name} cannot branch from itself")
+                if service.branch.parent_service not in self.services:
+                    raise ValueError(
+                        f"branch parent_service {service.branch.parent_service} "
+                        f"for {name} is not present in services"
+                    )
             route_paths[route_path] = name
         return self
 
@@ -219,6 +242,7 @@ class LockedServiceSpec(BaseModel):
     release_data_dir: Path
     secret_env_file: Path | None
     openviking: LockedOpenViking
+    branch: BranchSpec | None = None
 
 
 class LockedServerConfig(BaseModel):
@@ -495,6 +519,7 @@ def _render_locked_service(
             config_file=release_root / "config" / "openviking.conf",
             cli_config_file=release_root / "config" / "ovcli.conf",
         ),
+        branch=spec.branch,
     )
 
 

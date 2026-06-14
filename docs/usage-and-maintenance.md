@@ -27,7 +27,49 @@ mkdir -p ~/.ov_mgn
 chmod 700 ~/.ov_mgn
 ```
 
-### 1.2 准备 model.json
+### 1.2 用向导生成初始配置
+
+推荐先用交互式向导生成 `server.json` 和 `model.json`：
+
+```bash
+uv run ov-mgn wizard init
+```
+
+向导默认写入 `~/.ov_mgn/server.json` 和 `~/.ov_mgn/model.json`。如果文件已存在，默认
+跳过；`server.json` 可选择追加普通服务，`model.json` 只有二次确认后才会重写。API
+key 可以留空，向导会写入 `replace-me` 占位值，之后再编辑成真实值。所有向导写入前
+都会再次询问是否确认写入；选择 no 不会修改文件。
+
+`wizard init` 的主流程只覆盖首次可运行所需的基础项：是否创建首个服务、服务源码位置、
+以及需要哪些模型能力。route path、服务级镜像、Git ref、gateway、backend 端口等不常
+改的内容放在高级确认或 `wizard edit` 里。源码目录、数据目录、模型配置文件和 secret
+env 文件等路径输入支持 Tab 自动补全。
+
+后续追加普通服务可以使用：
+
+```bash
+uv run ov-mgn wizard add-service
+```
+
+已有配置的小改动可以使用交互式编辑脚手架：
+
+```bash
+uv run ov-mgn wizard edit
+```
+
+`wizard edit` 会先选择 `server` 或 `model`。编辑 `server.json` 时继续分成
+`defaults` 和 `service`：默认配置默认只询问默认镜像、数据目录和可选 secret env；
+只有确认需要高级选项后，才会继续询问模型配置文件、backend 端口、gateway 绑定、网络
+和 candidate 端口范围。服务配置默认只询问服务名和源码位置；只有确认需要高级服务选项
+后，才会继续询问 Git ref、route path 和服务级镜像。编辑已有服务时，默认值来自当前
+配置，未进入高级选项则保留已有高级字段。写入前仍复用现有 schema 校验。编辑
+`model.json` 时先选择 `embedding`、`vlm` 或 `bot`，再按 API URL、API key、模型名的
+顺序填写；默认值来自当前配置。每次修改后可以选择继续修改，返回 `server` / `model`
+选择列表；结束修改后再统一确认写入已改过的配置文件。
+
+分支服务不要用 `wizard add-service` 手写，继续使用 `branch SOURCE TARGET`。
+
+### 1.3 手动准备 model.json
 
 `~/.ov_mgn/model.json` 只允许 `embedding`、`vlm`、`bot` 顶层字段。真实 API key
 只写在这里，不写入 `server.json`、lock 或 status 输出。
@@ -68,7 +110,7 @@ EOF
 chmod 600 ~/.ov_mgn/model.json
 ```
 
-### 1.3 准备 server.json
+### 1.4 手动准备 server.json
 
 ```bash
 cat > ~/.ov_mgn/server.json <<'EOF'
@@ -111,7 +153,7 @@ EOF
 chmod 600 ~/.ov_mgn/server.json
 ```
 
-### 1.4 发布服务
+### 1.5 发布服务
 
 ```bash
 uv run ov-mgn config-file validate
@@ -299,42 +341,18 @@ uv run ov-mgn status
 
 ## 3. 配置说明
 
-### 3.1 server.json 关键字段
+字段级参考单独维护在 [配置字段参考](configuration-reference.md)。该文档按
+`server.json` 和 `model.json` 分别列出：
 
-- `defaults.image`：默认 OpenViking 镜像。
-- `defaults.backend_port`：容器内 OpenViking HTTP 服务端口，当前默认 `1933`。
-- `defaults.data_root`：release、candidate 数据和配置目录根路径。
-- `defaults.openviking.model_config_file`：模型配置文件路径，默认
-  `~/.ov_mgn/model.json`。
-- `defaults.gateway`：单机 Nginx 网关配置。gateway 是唯一支持的部署模式，
-  `enabled` 必须为 `true`。
-- `defaults.secret_env_file`：可选 Docker `--env-file` 路径。
-- `services.<name>.route_path`：服务路径，默认 `/{service}/`。
-- `services.<name>.source`：源码来源，支持 `local` 或 `git`。
-- `services.<name>.openviking.env`：附加容器环境变量。
-- `services.<name>.openviking.vars`：ov-mgn 渲染和分支管理变量，例如 `profile`。
-- `services.<name>.branch`：可选分支声明，只记录父服务和声明时间；目标服务第一次
-  `up` 时会从父服务当时的 online release data 复制初始数据。
+- 最小必填配置。
+- 常用字段。
+- 高级字段。
+- `必须提供`、`默认值`、`可自动推理`、`高级配置`、`不建议手写` 等标签。
 
-### 3.2 受 ov-mgn 管理的配置
+日常只需要按本文的快速启动示例维护配置；需要确认字段默认值、校验约束或高级配置时，
+再查阅字段参考。
 
-不要在 `openviking.env` 里设置这些变量：
-
-- `OPENVIKING_CONFIG_FILE`
-- `OPENVIKING_CLI_CONFIG_FILE`
-- `VIKINGBOT_API_KEY`
-- `PATH`
-
-`ov-mgn` 会自动注入：
-
-- `OPENVIKING_CONFIG_FILE=/app/config/openviking.conf`
-- `OPENVIKING_CLI_CONFIG_FILE=/app/config/ovcli.conf`
-- `PATH=/app/config/bin:...`
-
-`server.root_api_key` 由 `ov-mgn` 自动生成并保存在 release 配置目录，不写入
-`server.json`。
-
-### 3.3 Secret 文件
+### 3.1 Secret 文件
 
 如果服务还需要额外环境变量文件：
 
@@ -484,6 +502,9 @@ uv run ov-mgn server-config paths
 
 | 命令 | 读取 | 写入 |
 | --- | --- | --- |
+| `wizard init` | `server.json`、`model.json` | `server.json`、`model.json` |
+| `wizard add-service` | `server.json` | `server.json` |
+| `wizard edit` | `server.json` 或 `model.json` | `server.json` 或 `model.json` |
 | `config-file show/set/unset` | `server.json` | `server.json` |
 | `config-file validate` | `server.json`、`model.json` | 无 |
 | `branch SOURCE TARGET` | `server.json` | `server.json` |

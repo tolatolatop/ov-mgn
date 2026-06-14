@@ -35,6 +35,7 @@ from ov_mgn.server_config import (
     write_lock_file,
 )
 from ov_mgn.status import build_services_summary
+from ov_mgn.wizard import InquirerPrompts, run_add_service_wizard, run_edit_wizard, run_init_wizard
 
 logger = get_logger(__name__)
 
@@ -410,6 +411,93 @@ def unset_config_file_value(config_path: Path | None, path: str) -> None:
         raise click.ClickException(str(exc)) from exc
     _save_user_config_payload_or_fail(payload, config_path)
     click.echo("updated")
+
+
+@main.group("wizard")
+def wizard() -> None:
+    """Interactive configuration wizard."""
+
+
+@wizard.command("init")
+@click.option(
+    "--config-path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Path to server.json. Defaults to ~/.ov_mgn/server.json.",
+)
+@click.option(
+    "--model-path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Path to model.json. Defaults to ~/.ov_mgn/model.json.",
+)
+def wizard_init(config_path: Path | None, model_path: Path | None) -> None:
+    """Initialize server.json and model.json interactively."""
+    logger.debug("command wizard init config_path=%s model_path=%s", config_path, model_path)
+    try:
+        written = run_init_wizard(
+            InquirerPrompts(),
+            config_path=config_path,
+            model_path=model_path,
+        )
+    except (OSError, json.JSONDecodeError, ValidationError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    if written:
+        for path in written:
+            click.echo(f"wrote {path}")
+    else:
+        click.echo("no changes")
+
+
+@wizard.command("add-service")
+@click.option(
+    "--config-path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Path to server.json. Defaults to ~/.ov_mgn/server.json.",
+)
+def wizard_add_service(config_path: Path | None) -> None:
+    """Add a normal service to server.json interactively."""
+    logger.debug("command wizard add-service config_path=%s", config_path)
+    try:
+        path = run_add_service_wizard(InquirerPrompts(), config_path=config_path)
+    except (OSError, json.JSONDecodeError, ValidationError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    if path is None:
+        click.echo("no changes")
+    else:
+        click.echo(f"wrote {path}")
+
+
+@wizard.command("edit")
+@click.option(
+    "--config-path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Path to server.json. Defaults to ~/.ov_mgn/server.json.",
+)
+@click.option(
+    "--model-path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Path to model.json. Defaults to ~/.ov_mgn/model.json.",
+)
+def wizard_edit(config_path: Path | None, model_path: Path | None) -> None:
+    """Edit server.json or model.json interactively."""
+    logger.debug("command wizard edit config_path=%s model_path=%s", config_path, model_path)
+    try:
+        written = run_edit_wizard(
+            InquirerPrompts(),
+            config_path=config_path,
+            model_path=model_path,
+        )
+    except (OSError, json.JSONDecodeError, ValidationError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    if not written:
+        click.echo("no changes")
+    else:
+        for path in written:
+            click.echo(f"wrote {path}")
 
 
 @main.group("server-config", hidden=True)

@@ -18,6 +18,68 @@ from ov_mgn.server_config import (
     write_release_lock,
     write_state,
 )
+from ov_mgn.wizard import run_edit_wizard, run_init_wizard
+
+
+class FakePrompts:
+    def __init__(
+        self,
+        *,
+        inputs: list[str] | None = None,
+        secrets: list[str] | None = None,
+        confirms: list[bool] | None = None,
+        selects: list[str] | None = None,
+    ) -> None:
+        self.inputs = inputs or []
+        self.secrets = secrets or []
+        self.confirms = confirms or []
+        self.selects = selects or []
+
+    def input(self, message: str, *, default: str = "") -> str:
+        return self.inputs.pop(0) if self.inputs else default
+
+    def path(
+        self,
+        message: str,
+        *,
+        default: str = "",
+        only_directories: bool = False,
+        only_files: bool = False,
+        mandatory: bool = True,
+    ) -> str:
+        return self.inputs.pop(0) if self.inputs else default
+
+    def secret(self, message: str, *, default: str = "") -> str:
+        return self.secrets.pop(0) if self.secrets else default
+
+    def confirm(self, message: str, *, default: bool = False) -> bool:
+        return self.confirms.pop(0) if self.confirms else default
+
+    def select(self, message: str, choices: list[str], *, default: str | None = None) -> str:
+        if self.selects:
+            value = self.selects.pop(0)
+            assert value in choices
+            return value
+        assert default is not None
+        return default
+
+    def select_key(
+        self,
+        message: str,
+        choices: list[tuple[str, str]],
+        *,
+        default: str | None = None,
+    ) -> str:
+        values = [value for value, _label in choices]
+        labels = {label: value for value, label in choices}
+        if self.selects:
+            value = self.selects.pop(0)
+            if value in labels:
+                return labels[value]
+            assert value in values
+            return value
+        assert default is not None
+        return default
 
 
 def test_version_command() -> None:
@@ -614,6 +676,357 @@ def test_config_file_help_only_shows_minimal_commands() -> None:
         "online",
     ):
         assert removed not in result.output
+
+
+def test_wizard_help_shows_init_and_add_service() -> None:
+    result = CliRunner().invoke(main, ["wizard", "--help"])
+
+    assert result.exit_code == 0
+    assert "init" in result.output
+    assert "add-service" in result.output
+    assert "edit" in result.output
+
+
+def test_wizard_init_creates_server_and_model_config(tmp_path) -> None:
+    config_path = tmp_path / "server.json"
+    model_path = tmp_path / "model.json"
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    prompts = FakePrompts(
+        inputs=[
+            "alpha",
+            str(source_dir),
+            "/alpha/",
+            "example/openviking:alpha",
+            "https://api.example.invalid/v1",
+            "text-embedding-3-small",
+        ],
+        secrets=[""],
+        confirms=[True, True, True, False, False, True, True],
+        selects=["local"],
+    )
+
+    written = run_init_wizard(prompts, config_path=config_path, model_path=model_path)
+
+    assert written == [config_path, model_path]
+    server = json.loads(config_path.read_text(encoding="utf-8"))
+    alpha = server["services"]["alpha"]
+    assert server["defaults"]["openviking"]["model_config_file"] == str(model_path)
+    assert alpha["source"]["type"] == "local"
+    assert alpha["source"]["path"] == str(source_dir)
+    assert alpha["route_path"] == "/alpha/"
+    assert alpha["image"] == "example/openviking:alpha"
+    assert alpha["openviking"]["env"] == {}
+    assert alpha["openviking"]["vars"] == {}
+    model = json.loads(model_path.read_text(encoding="utf-8"))
+    assert model["embedding"]["dense"]["api_key"] == "replace-me"
+    assert model["embedding"]["dense"]["api_base"] == "https://api.example.invalid/v1"
+
+
+def test_wizard_init_existing_files_default_skip_preserves_files(tmp_path) -> None:
+    config_path = tmp_path / "server.json"
+    model_path = tmp_path / "model.json"
+    config_path.write_text('{"services": {}}\n', encoding="utf-8")
+    model_path.write_text('{"embedding": {"dense": {"api_key": "old"}}}\n', encoding="utf-8")
+    original_config = config_path.read_text(encoding="utf-8")
+    original_model = model_path.read_text(encoding="utf-8")
+    prompts = FakePrompts(selects=["skip", "skip"])
+
+    written = run_init_wizard(prompts, config_path=config_path, model_path=model_path)
+
+    assert written == []
+    assert config_path.read_text(encoding="utf-8") == original_config
+    assert model_path.read_text(encoding="utf-8") == original_model
+
+
+def test_wizard_init_model_failure_does_not_write_server_config(tmp_path) -> None:
+    config_path = tmp_path / "server.json"
+    model_path = tmp_path / "model.json"
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    prompts = FakePrompts(
+        inputs=["alpha", str(source_dir)],
+        confirms=[True, False, False, False, False],
+        selects=["local"],
+    )
+
+    try:
+        run_init_wizard(prompts, config_path=config_path, model_path=model_path)
+    except ValueError as exc:
+        assert "at least one" in str(exc)
+    else:
+        raise AssertionError("expected model validation failure")
+
+    assert not config_path.exists()
+    assert not model_path.exists()
+
+
+def test_wizard_init_can_append_service_and_rewrite_model_after_confirm(tmp_path) -> None:
+    config_path = tmp_path / "server.json"
+    model_path = tmp_path / "model.json"
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    _write_config(config_path, source_dir)
+    model_path.write_text('{"embedding": {"dense": {"api_key": "old"}}}\n', encoding="utf-8")
+    prompts = FakePrompts(
+        inputs=[
+            "beta",
+            "https://example.com/openviking.git",
+            "",
+            "/beta/",
+            "",
+            "https://api.example.invalid/v1",
+            "gpt-4o-mini",
+        ],
+        secrets=["new-secret"],
+        confirms=[True, True, True, False, False, True, True],
+        selects=["add-service", "git", "rewrite"],
+    )
+
+    written = run_init_wizard(prompts, config_path=config_path, model_path=model_path)
+
+    assert written == [config_path, model_path]
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    assert payload["services"]["beta"]["source"]["type"] == "git"
+    assert payload["services"]["beta"]["source"]["repo"] == "https://example.com/openviking.git"
+    assert payload["services"]["beta"]["branch"] is None
+    model = json.loads(model_path.read_text(encoding="utf-8"))
+    assert model["embedding"]["dense"]["api_key"] == "new-secret"
+
+
+def test_wizard_add_service_cli_rejects_duplicate_route_without_writing(
+    tmp_path, monkeypatch
+) -> None:
+    config_path = tmp_path / "server.json"
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    _write_config(config_path, source_dir, include_beta=True)
+    original = config_path.read_text(encoding="utf-8")
+    prompts = FakePrompts(
+        inputs=["gamma", str(source_dir), "/alpha/", "gamma", "", ""],
+        confirms=[True],
+        selects=["local"],
+    )
+    monkeypatch.setattr("ov_mgn.cli.InquirerPrompts", lambda: prompts)
+
+    result = CliRunner().invoke(
+        main,
+        ["wizard", "add-service", "--config-path", str(config_path)],
+    )
+
+    assert result.exit_code != 0
+    assert "route_path /alpha/" in result.output
+    assert config_path.read_text(encoding="utf-8") == original
+
+
+def test_wizard_add_service_cancel_write_preserves_file(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "server.json"
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    _write_config(config_path, source_dir)
+    original = config_path.read_text(encoding="utf-8")
+    prompts = FakePrompts(
+        inputs=["beta", str(source_dir)],
+        confirms=[False, False],
+        selects=["local"],
+    )
+    monkeypatch.setattr("ov_mgn.cli.InquirerPrompts", lambda: prompts)
+
+    result = CliRunner().invoke(
+        main,
+        ["wizard", "add-service", "--config-path", str(config_path)],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.output.strip() == "no changes"
+    assert config_path.read_text(encoding="utf-8") == original
+
+
+def test_wizard_edit_updates_server_field_from_scaffold(tmp_path) -> None:
+    config_path = tmp_path / "server.json"
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    _write_config(config_path, source_dir)
+    prompts = FakePrompts(
+        inputs=["alpha", str(source_dir), "/alpha-v2/"],
+        confirms=[True, False, True],
+        selects=["server", "service", "alpha", "local"],
+    )
+
+    written = run_edit_wizard(prompts, config_path=config_path)
+
+    assert written == [config_path]
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    assert payload["services"]["alpha"]["route_path"] == "/alpha-v2/"
+
+
+def test_wizard_edit_updates_basic_defaults_without_advanced_prompts(tmp_path) -> None:
+    config_path = tmp_path / "server.json"
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    _write_config(config_path, source_dir)
+    prompts = FakePrompts(
+        inputs=[
+            "ghcr.io/volcengine/openviking:stable",
+            str(tmp_path / "data-v2"),
+            str(tmp_path / "secrets.env"),
+        ],
+        confirms=[False, False, True],
+        selects=["server", "defaults"],
+    )
+
+    written = run_edit_wizard(prompts, config_path=config_path)
+
+    assert written == [config_path]
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    assert payload["defaults"]["image"] == "ghcr.io/volcengine/openviking:stable"
+    assert payload["defaults"]["data_root"] == str(tmp_path / "data-v2")
+    assert payload["defaults"]["secret_env_file"] == str(tmp_path / "secrets.env")
+    assert payload["defaults"]["backend_port"] == 1933
+    assert payload["defaults"]["openviking"]["model_config_file"].endswith("model.json")
+    assert payload["defaults"]["gateway"]["host"] == "127.0.0.1"
+    assert payload["defaults"]["gateway"]["port"] == 18080
+
+
+def test_wizard_edit_updates_advanced_defaults_when_requested(tmp_path) -> None:
+    config_path = tmp_path / "server.json"
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    _write_config(config_path, source_dir)
+    prompts = FakePrompts(
+        inputs=[
+            "ghcr.io/volcengine/openviking:stable",
+            str(tmp_path / "data-v2"),
+            "",
+            str(tmp_path / "model-v2.json"),
+            "1934",
+            "0.0.0.0",
+            "18081",
+            "nginx:1.27-alpine",
+            "ov-mgn-custom",
+            "32000",
+            "32999",
+        ],
+        confirms=[True, False, True],
+        selects=["server", "defaults"],
+    )
+
+    written = run_edit_wizard(prompts, config_path=config_path)
+
+    assert written == [config_path]
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    assert payload["defaults"]["backend_port"] == 1934
+    assert payload["defaults"]["openviking"]["model_config_file"] == str(tmp_path / "model-v2.json")
+    assert payload["defaults"]["gateway"]["host"] == "0.0.0.0"
+    assert payload["defaults"]["gateway"]["port"] == 18081
+    assert payload["defaults"]["gateway"]["image"] == "nginx:1.27-alpine"
+    assert payload["defaults"]["gateway"]["network_name"] == "ov-mgn-custom"
+    assert payload["defaults"]["port_range"] == [32000, 32999]
+    assert "secret_env_file" not in payload["defaults"]
+
+
+def test_wizard_edit_service_empty_image_removes_service_image(tmp_path) -> None:
+    config_path = tmp_path / "server.json"
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    _write_config(config_path, source_dir)
+    prompts = FakePrompts(
+        inputs=["alpha", str(source_dir), "/alpha/", ""],
+        confirms=[True, False, True],
+        selects=["server", "service", "alpha", "local"],
+    )
+
+    written = run_edit_wizard(prompts, config_path=config_path)
+
+    assert written == [config_path]
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    assert "image" not in payload["services"]["alpha"]
+
+
+def test_wizard_edit_invalid_server_change_preserves_file(tmp_path, monkeypatch) -> None:
+    config_path = tmp_path / "server.json"
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    _write_config(config_path, source_dir, include_beta=True)
+    original = config_path.read_text(encoding="utf-8")
+    prompts = FakePrompts(
+        inputs=["beta", str(source_dir), "/alpha/"],
+        confirms=[True],
+        selects=["server", "service", "beta", "local"],
+    )
+    monkeypatch.setattr("ov_mgn.cli.InquirerPrompts", lambda: prompts)
+
+    result = CliRunner().invoke(main, ["wizard", "edit", "--config-path", str(config_path)])
+
+    assert result.exit_code != 0
+    assert "route_path /alpha/" in result.output
+    assert config_path.read_text(encoding="utf-8") == original
+
+
+def test_wizard_edit_replaces_model_section(tmp_path) -> None:
+    model_path = _write_model_config(tmp_path)
+    prompts = FakePrompts(
+        inputs=["https://api.example.invalid/v1", "gpt-4o-mini"],
+        secrets=["bot-secret"],
+        confirms=[False, True],
+        selects=["model", "bot"],
+    )
+
+    written = run_edit_wizard(prompts, model_path=model_path)
+
+    assert written == [model_path]
+    payload = json.loads(model_path.read_text(encoding="utf-8"))
+    assert payload["bot"]["api_base"] == "https://api.example.invalid/v1"
+    assert payload["bot"]["api_key"] == "bot-secret"
+    assert payload["bot"]["model"] == "gpt-4o-mini"
+
+
+def test_wizard_edit_model_section_defaults_from_existing_config(tmp_path) -> None:
+    model_path = _write_model_config(tmp_path)
+    prompts = FakePrompts(
+        inputs=["https://api.example.invalid/v2", "text-embedding-3-large"],
+        confirms=[False, True],
+        selects=["model", "embedding"],
+    )
+
+    written = run_edit_wizard(prompts, model_path=model_path)
+
+    assert written == [model_path]
+    payload = json.loads(model_path.read_text(encoding="utf-8"))
+    assert payload["embedding"]["dense"]["api_base"] == "https://api.example.invalid/v2"
+    assert payload["embedding"]["dense"]["api_key"] == "secret"
+    assert payload["embedding"]["dense"]["model"] == "text-embedding-3-large"
+
+
+def test_wizard_edit_can_stage_server_and_model_before_saving(tmp_path) -> None:
+    config_path = tmp_path / "server.json"
+    model_path = _write_model_config(tmp_path)
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    _write_config(config_path, source_dir)
+    prompts = FakePrompts(
+        inputs=[
+            "alpha",
+            str(source_dir),
+            "/alpha-bulk/",
+            "",
+            "https://api.example.invalid/v3",
+            "text-embedding-3-large",
+        ],
+        secrets=["bulk-secret"],
+        confirms=[True, True, False, True, True],
+        selects=["server", "service", "alpha", "local", "model", "embedding"],
+    )
+
+    written = run_edit_wizard(prompts, config_path=config_path, model_path=model_path)
+
+    assert written == [config_path, model_path]
+    server = json.loads(config_path.read_text(encoding="utf-8"))
+    model = json.loads(model_path.read_text(encoding="utf-8"))
+    assert server["services"]["alpha"]["route_path"] == "/alpha-bulk/"
+    assert model["embedding"]["dense"]["api_base"] == "https://api.example.invalid/v3"
+    assert model["embedding"]["dense"]["api_key"] == "bulk-secret"
+    assert model["embedding"]["dense"]["model"] == "text-embedding-3-large"
 
 
 def test_config_file_show_and_validate(tmp_path) -> None:

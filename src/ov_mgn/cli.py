@@ -8,7 +8,7 @@ from pydantic import ValidationError
 from ov_mgn import __version__
 from ov_mgn.config import AppConfig, LogLevel, load_config
 from ov_mgn.docker import DockerClient
-from ov_mgn.lifecycle import down_service, promote_service, up_service
+from ov_mgn.lifecycle import down_service, promote_service, switch_service, up_service
 from ov_mgn.logging import configure_logging, get_logger
 from ov_mgn.server_config import (
     UserServerConfig,
@@ -24,6 +24,7 @@ from ov_mgn.server_config import (
     save_user_server_config_data,
     write_lock_file,
 )
+from ov_mgn.status import build_services_summary
 
 logger = get_logger(__name__)
 
@@ -86,24 +87,37 @@ def show_config(env_file: str) -> None:
     help="Path to server.json.lock. Defaults to ~/.ov_mgn/server.json.lock.",
 )
 def plan(config_path: Path | None, lock_path: Path | None) -> None:
-    """Generate the read-only candidate deployment lock."""
+    """Generate the read-only gateway deployment lock."""
     click.echo(str(_write_plan(config_path, lock_path)))
 
 
 @main.command("up")
 @click.argument("service")
 @click.option("--lock-path", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@click.option("--release-path", type=click.Path(dir_okay=False, path_type=Path), default=None)
 @click.option("--state-path", type=click.Path(dir_okay=False, path_type=Path), default=None)
 @click.option("--dry-run", is_flag=True, help="Build files and state without running Docker.")
-def up(service: str, lock_path: Path | None, state_path: Path | None, dry_run: bool) -> None:
-    """Start a candidate container for SERVICE."""
-    release_id, port = up_service(
+def up(
+    service: str,
+    lock_path: Path | None,
+    release_path: Path | None,
+    state_path: Path | None,
+    dry_run: bool,
+) -> None:
+    """Start a candidate backend container for SERVICE."""
+    release_id, _port = up_service(
         service,
         lock_path=lock_path,
+        release_path=release_path,
         state_path=state_path,
         docker=DockerClient(dry_run=dry_run),
     )
-    click.echo(f"{service} candidate {release_id} listening on port {port}")
+    locked = load_locked_config(lock_path)
+    locked_service = locked.services[service]
+    url = (
+        f"http://{locked.gateway.host}:{locked.gateway.port}{locked_service.route_path}__candidate/"
+    )
+    click.echo(f"{service} candidate {release_id} preview {url}")
 
 
 @main.command("promote")
@@ -119,7 +133,7 @@ def promote(
     state_path: Path | None,
     dry_run: bool,
 ) -> None:
-    """Promote SERVICE candidate to its stable port."""
+    """Promote SERVICE candidate to the stable gateway route."""
     release_id = promote_service(
         service,
         lock_path=lock_path,
@@ -130,33 +144,65 @@ def promote(
     click.echo(f"{service} online {release_id}")
 
 
+@main.command("switch")
+@click.argument("service")
+@click.argument("release_id")
+@click.option("--lock-path", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@click.option("--release-path", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@click.option("--state-path", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@click.option("--dry-run", is_flag=True, help="Update files without running Docker checks.")
+def switch(
+    service: str,
+    release_id: str,
+    lock_path: Path | None,
+    release_path: Path | None,
+    state_path: Path | None,
+    dry_run: bool,
+) -> None:
+    """Switch SERVICE stable gateway route to RELEASE_ID."""
+    switched_release = switch_service(
+        service,
+        release_id,
+        lock_path=lock_path,
+        release_path=release_path,
+        state_path=state_path,
+        docker=DockerClient(dry_run=dry_run),
+    )
+    click.echo(f"{service} switched {switched_release}")
+
+
 @main.command("down")
 @click.argument("service")
 @click.option("--lock-path", type=click.Path(dir_okay=False, path_type=Path), default=None)
 @click.option("--release-path", type=click.Path(dir_okay=False, path_type=Path), default=None)
+@click.option("--state-path", type=click.Path(dir_okay=False, path_type=Path), default=None)
 @click.option("--dry-run", is_flag=True, help="Do not run Docker commands.")
 def down(
     service: str,
     lock_path: Path | None,
     release_path: Path | None,
+    state_path: Path | None,
     dry_run: bool,
 ) -> None:
-    """Stop SERVICE candidate and online containers known to ov-mgn."""
+    """Stop SERVICE backend containers known to ov-mgn."""
     down_service(
         service,
         lock_path=lock_path,
         release_path=release_path,
+        state_path=state_path,
         docker=DockerClient(dry_run=dry_run),
     )
     click.echo(f"{service} stopped")
 
 
 @main.command("status")
+@click.option("--config-path", type=click.Path(dir_okay=False, path_type=Path), default=None)
 @click.option("--lock-path", type=click.Path(dir_okay=False, path_type=Path), default=None)
 @click.option("--release-path", type=click.Path(dir_okay=False, path_type=Path), default=None)
 @click.option("--state-path", type=click.Path(dir_okay=False, path_type=Path), default=None)
 @click.option("--no-docker", is_flag=True, help="Skip Docker inspection.")
 def status(
+    config_path: Path | None,
     lock_path: Path | None,
     release_path: Path | None,
     state_path: Path | None,
@@ -165,18 +211,39 @@ def status(
     """Print lock, release, state and Docker status."""
     payload: dict[str, object] = {
         "paths": {
+            "config": str(config_path or get_server_config_path()),
             "lock": str(lock_path or get_server_lock_path()),
             "release": str(release_path or get_release_lock_path()),
             "state": str(state_path or get_state_path()),
         }
     }
+    config = _load_user_config_or_fail(config_path)
     try:
-        payload["lock"] = load_locked_config(lock_path).model_dump(mode="json")
+        lock = load_locked_config(lock_path)
     except FileNotFoundError:
+        lock = None
         payload["lock"] = None
-    payload["release"] = load_release_lock(release_path).model_dump(mode="json")
-    payload["state"] = load_state(state_path).model_dump(mode="json")
-    payload["docker"] = None if no_docker else DockerClient().inspect_status()
+    else:
+        payload["lock"] = lock.model_dump(mode="json")
+    release = load_release_lock(release_path)
+    state = load_state(state_path)
+    docker_client = DockerClient()
+    docker_containers = [] if no_docker else docker_client.inspect_containers()
+    if not no_docker and lock:
+        gateway_container = docker_client.inspect_gateway_container(lock.gateway_container_name)
+        if gateway_container:
+            docker_containers.append(gateway_container)
+    payload["release"] = release.model_dump(mode="json")
+    payload["state"] = state.model_dump(mode="json")
+    payload["docker"] = None if no_docker else docker_client.inspect_status()
+    payload["services_summary"] = build_services_summary(
+        config=config,
+        lock=lock,
+        release=release,
+        state=state,
+        docker_containers=docker_containers,
+        docker_skipped=no_docker,
+    )
     click.echo(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
@@ -384,7 +451,11 @@ def _is_openviking_map_path(parts: list[str]) -> bool:
 
 
 def _is_optional_config_field(parts: list[str]) -> bool:
+    if len(parts) == 2 and parts[0] == "defaults" and parts[1] == "secret_env_file":
+        return True
     if len(parts) == 3 and parts[0] == "services" and parts[2] == "image":
+        return True
+    if len(parts) == 3 and parts[0] == "services" and parts[2] == "route_path":
         return True
     if (
         len(parts) == 4

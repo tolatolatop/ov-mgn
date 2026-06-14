@@ -24,7 +24,7 @@ def test_user_level_paths_are_under_ov_mgn_dir(tmp_path) -> None:
     assert get_server_config_path(tmp_path) == tmp_path / ".ov_mgn" / "server.json"
     assert get_server_lock_path(tmp_path) == tmp_path / ".ov_mgn" / "server.json.lock"
     assert get_release_lock_path(tmp_path) == tmp_path / ".ov_mgn" / "release.json.lock"
-    assert get_state_path(tmp_path) == tmp_path / ".ov_mgn" / "state.json"
+    assert get_state_path(tmp_path) == tmp_path / ".ov_mgn" / "state.json.lock"
 
 
 def test_missing_user_config_returns_empty_default_config(tmp_path) -> None:
@@ -71,14 +71,94 @@ def test_render_locked_config_applies_defaults(tmp_path) -> None:
     service = locked.services["alpha"]
     assert service.image == "example/openviking:stable"
     assert service.stable_port == 18080
+    assert service.backend_port == 1933
     assert service.candidate_port == 31000
     assert service.release_id.startswith("alpha-20260613T000000-")
     assert service.candidate_container_name.startswith("ov-mgn-alpha-candidate-")
     assert service.online_container_name == "ov-mgn-alpha-online"
-    assert service.network_name == "ov-mgn-alpha"
+    assert service.network_name == "ov-mgn-gateway"
     assert service.secret_env_file.name == "secret.env"
     assert service.openviking.vars["profile"] == "alpha-custom"
     assert service.openviking.env == {"TZ": "Asia/Shanghai"}
+
+
+def test_secret_env_file_defaults_to_none(tmp_path) -> None:
+    config = UserServerConfig.model_validate(
+        {
+            "defaults": {"data_root": str(tmp_path / "data")},
+            "services": {
+                "alpha": {
+                    "stable_port": 18080,
+                    "source": {"type": "local", "path": "."},
+                }
+            },
+        }
+    )
+
+    service = render_locked_config(config).services["alpha"]
+
+    assert service.secret_env_file is None
+
+
+def test_gateway_config_renders_default_routes_and_global_network(tmp_path) -> None:
+    config = UserServerConfig.model_validate(
+        {
+            "defaults": {
+                "data_root": str(tmp_path / "data"),
+                "gateway": {"enabled": True, "port": 18080},
+            },
+            "services": {
+                "alpha": {
+                    "stable_port": 18080,
+                    "source": {"type": "local", "path": "."},
+                }
+            },
+        }
+    )
+
+    locked = render_locked_config(config)
+    service = locked.services["alpha"]
+
+    assert locked.gateway.enabled is True
+    assert locked.gateway.port == 18080
+    assert service.route_path == "/alpha/"
+    assert service.network_name == "ov-mgn-gateway"
+    assert service.release_container_name.startswith("ov-mgn-alpha-alpha-")
+
+
+def test_gateway_config_rejects_duplicate_route_paths(tmp_path) -> None:
+    with pytest.raises(ValidationError, match="route_path /kb/"):
+        UserServerConfig.model_validate(
+            {
+                "defaults": {"gateway": {"enabled": True, "port": 18080}},
+                "services": {
+                    "alpha": {
+                        "stable_port": 18080,
+                        "route_path": "/kb/",
+                        "source": {"type": "local", "path": "."},
+                    },
+                    "beta": {
+                        "stable_port": 18080,
+                        "route_path": "/kb/",
+                        "source": {"type": "local", "path": "."},
+                    },
+                },
+            }
+        )
+
+
+def test_gateway_config_rejects_reserved_info_route_path() -> None:
+    with pytest.raises(ValidationError, match="reserved /__ov-mgn/ prefix"):
+        UserServerConfig.model_validate(
+            {
+                "services": {
+                    "alpha": {
+                        "route_path": "/__ov-mgn/",
+                        "source": {"type": "local", "path": "."},
+                    }
+                }
+            }
+        )
 
 
 def test_write_lock_file_is_read_only(tmp_path) -> None:
@@ -129,6 +209,42 @@ def test_materialize_service_copies_local_source_and_renders_template(tmp_path) 
     assert DEFAULT_CONFIG_TEMPLATE.startswith("# Generated")
 
 
+def test_materialize_service_renders_ovcli_config_from_root_api_key(tmp_path) -> None:
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    root_api_key = "test-root-key"
+    template = tmp_path / "openviking.conf"
+    template.write_text(
+        f'{{"server": {{"host": "0.0.0.0", "port": 1933, "root_api_key": "{root_api_key}"}}}}',
+        encoding="utf-8",
+    )
+    config = UserServerConfig.model_validate(
+        {
+            "defaults": {"data_root": str(tmp_path / "data"), "backend_port": 1933},
+            "services": {
+                "alpha": {
+                    "stable_port": 18080,
+                    "source": {"type": "local", "path": str(source_dir)},
+                    "openviking": {"template_path": str(template)},
+                }
+            },
+        }
+    )
+
+    service = render_locked_config(config).services["alpha"]
+    materialize_service(service)
+
+    assert service.openviking.cli_config_file.read_text(encoding="utf-8") == (
+        "{\n"
+        '  "url": "http://127.0.0.1:1933",\n'
+        '  "api_key": "test-root-key",\n'
+        '  "account": "default",\n'
+        '  "user": "default"\n'
+        "}\n"
+    )
+    assert "test-root-key" not in service.model_dump_json()
+
+
 def test_lock_does_not_include_secret_file_contents(tmp_path) -> None:
     secret_file = tmp_path / "secrets.env"
     secret_file.write_text("TOKEN=super-secret\n", encoding="utf-8")
@@ -150,25 +266,31 @@ def test_lock_does_not_include_secret_file_contents(tmp_path) -> None:
     assert "super-secret" not in locked.model_dump_json()
 
 
-def test_user_config_rejects_duplicate_stable_ports() -> None:
-    with pytest.raises(ValidationError, match="stable_port 18080"):
+def test_user_config_rejects_duplicate_route_paths() -> None:
+    with pytest.raises(ValidationError, match="route_path /shared/"):
         UserServerConfig.model_validate(
             {
                 "services": {
-                    "alpha": {"stable_port": 18080, "source": {"type": "local", "path": "."}},
-                    "beta": {"stable_port": 18080, "source": {"type": "local", "path": "."}},
+                    "alpha": {
+                        "route_path": "/shared/",
+                        "source": {"type": "local", "path": "."},
+                    },
+                    "beta": {
+                        "route_path": "/shared/",
+                        "source": {"type": "local", "path": "."},
+                    },
                 }
             }
         )
 
 
-def test_user_config_rejects_port_range_covering_stable_port() -> None:
-    with pytest.raises(ValidationError, match="must not include stable_port"):
+def test_user_config_rejects_disabled_gateway_mode() -> None:
+    with pytest.raises(ValidationError, match="only gateway mode is supported"):
         UserServerConfig.model_validate(
             {
-                "defaults": {"port_range": [18000, 18100]},
+                "defaults": {"gateway": {"enabled": False}},
                 "services": {
-                    "alpha": {"stable_port": 18080, "source": {"type": "local", "path": "."}},
+                    "alpha": {"source": {"type": "local", "path": "."}},
                 },
             }
         )

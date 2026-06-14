@@ -2,8 +2,8 @@
 
 `ov-mgn` is a lightweight OpenViking service manager. It manages isolated
 OpenViking knowledge-base service copies with a candidate/promote workflow:
-new releases start on temporary ports, then a user promotes a checked candidate
-onto the stable service port.
+new releases start as backend containers behind a single Nginx gateway, then a
+user promotes a checked candidate route onto the stable service route.
 
 ## Commands
 
@@ -13,6 +13,7 @@ uv run ov-mgn --help
 uv run ov-mgn plan
 uv run ov-mgn up alpha
 uv run ov-mgn promote alpha
+uv run ov-mgn switch alpha alpha-20260613T120000-abcd123
 uv run ov-mgn status
 uv run pytest
 uv run ruff check .
@@ -25,11 +26,13 @@ updates, promotion, and maintenance, see
 The main lifecycle commands are:
 
 - `plan`: read `~/.ov_mgn/server.json` and write read-only `server.json.lock`.
-- `up SERVICE`: materialize the locked release and start its candidate container.
-- `promote SERVICE`: move candidate data into the release, remove only online
-  containers with the same stable host/port, and start the stable online
-  container.
-- `down SERVICE`: stop known candidate and online containers for the service.
+- `up SERVICE`: materialize the locked release, start its backend container, and
+  expose it at the candidate preview route.
+- `promote SERVICE`: point the stable gateway route at the candidate backend and
+  record the promoted release.
+- `switch SERVICE RELEASE_ID`: point the stable route at an already running
+  backend release.
+- `down SERVICE`: remove the service routes and stop known backend containers.
 - `status`: print lock, release, runtime state, and Docker status.
 
 ## Configuration Management
@@ -43,11 +46,12 @@ Use `config-file` for minimal `server.json` inspection and field edits:
 
 ```bash
 uv run ov-mgn config-file show
-uv run ov-mgn config-file show services.alpha.stable_port
+uv run ov-mgn config-file show defaults.gateway.port
 uv run ov-mgn config-file validate
 uv run ov-mgn config-file set defaults.image example/openviking:test
 uv run ov-mgn config-file set defaults.port_range '[31000,31999]'
-uv run ov-mgn config-file set services.alpha.stable_port 18080
+uv run ov-mgn config-file set defaults.gateway.port 18080
+uv run ov-mgn config-file set services.alpha.route_path /alpha/
 uv run ov-mgn config-file set services.alpha.openviking.env.TZ Asia/Shanghai
 uv run ov-mgn config-file unset services.alpha.openviking.vars.profile
 ```
@@ -58,9 +62,10 @@ accepted. It does not create missing intermediate structures, so it cannot be
 used to create a service. It can update existing service fields and add keys
 inside existing `openviking.env` or `openviking.vars` maps.
 
-`unset` can remove optional fields such as `services.alpha.image` and mapping
-keys such as `services.alpha.openviking.env.TZ`. It refuses to remove whole
-services or required fields such as `services.alpha.stable_port`.
+`unset` can remove optional fields such as `services.alpha.image`,
+`services.alpha.route_path`, and mapping keys such as
+`services.alpha.openviking.env.TZ`. It refuses to remove whole services or
+required fields such as `services.alpha.source`.
 
 Validation runs before and after edits. Failed changes return a non-zero exit
 code and leave the existing file unchanged:
@@ -84,7 +89,7 @@ secret file contents are not read into validate, show, lock, or status output.
 - `server.json`: user-edited service configuration.
 - `server.json.lock`: generated candidate deployment plan, written read-only.
 - `release.json.lock`: generated record of promoted releases, written read-only.
-- `state.json`: generated mutable runtime state.
+- `state.json.lock`: generated mutable runtime state.
 
 ## server.json
 
@@ -93,13 +98,22 @@ secret file contents are not read into validate, show, lock, or status output.
   "defaults": {
     "port_range": [30000, 39999],
     "image": "openviking/openviking:latest",
+    "backend_port": 1933,
     "data_root": "~/.ov_mgn/data",
-    "secret_env_file": "~/.ov_mgn/secrets.env"
+    "secret_env_file": null,
+    "gateway": {
+      "enabled": true,
+      "host": "127.0.0.1",
+      "port": 18080,
+      "image": "nginx:stable-alpine",
+      "network_name": "ov-mgn-gateway"
+    }
   },
   "services": {
     "alpha": {
       "stable_host": "127.0.0.1",
-      "stable_port": 18080,
+      "stable_port": 0,
+      "route_path": "/alpha/",
       "source": {
         "type": "git",
         "repo": "https://example.com/openviking.git",
@@ -123,20 +137,43 @@ a commit SHA when possible. Local sources are copied into the release code
 directory when `up` materializes the candidate, so later edits to the original
 directory do not change the release.
 
+Set `secret_env_file` to a real env file path only when the service needs one.
 Secrets are passed to Docker with `--env-file`; secret values are not read into
-the lock file.
+the lock file. `backend_port` is the port exposed by the service inside the
+container; current OpenViking images listen on `1933`.
+
+Gateway mode is the only supported deployment model. `defaults.gateway.enabled`
+must remain `true`; setting it to `false` is rejected. The external service URL
+is `http://{defaults.gateway.host}:{defaults.gateway.port}{route_path}`.
+`stable_host` and `stable_port` are retained as compatibility metadata and do
+not define the public entry point.
 
 ## Docker Model
 
 `ov-mgn` uses `docker run` directly in v1.
 
-- Network: `ov-mgn-{service}`
-- Candidate container: `ov-mgn-{service}-candidate-{release_id}`
-- Online container: `ov-mgn-{service}-online`
+Clients use one stable gateway entry point:
+
+- Stable URL: `http://{gateway_host}:{gateway_port}/{service}/`
+- Candidate preview URL: `http://{gateway_host}:{gateway_port}/{service}/__candidate/`
+- Gateway service directory: `http://{gateway_host}:{gateway_port}/__ov-mgn/`
+- Gateway service directory JSON:
+  `http://{gateway_host}:{gateway_port}/__ov-mgn/services.json`
+- Backend container: `ov-mgn-{service}-{release_id}`
+- Network: `defaults.gateway.network_name`
+- Gateway container: `ov-mgn-gateway`
 - Code: `~/.ov_mgn/data/{service}/releases/{release_id}/code`
 - Config: `~/.ov_mgn/data/{service}/releases/{release_id}/config`
-- Candidate data: `~/.ov_mgn/data/{service}/candidates/{release_id}/data`
 - Release data: `~/.ov_mgn/data/{service}/releases/{release_id}/data`
 
-Managed containers include `ov-mgn.service`, `ov-mgn.role`,
+Managed backend containers include `ov-mgn.service`, `ov-mgn.role=backend`,
 `ov-mgn.release_id`, `ov-mgn.stable_host`, and `ov-mgn.stable_port` labels.
+
+Gateway backend containers do not bind host ports. Nginx strips the service
+route prefix before proxying, so `/alpha/foo` reaches the backend as `/foo`.
+Nginx proxies to each backend container's configured `backend_port`.
+The built-in `__ov-mgn` paths are reserved and cannot be used as service
+`route_path` values. They are regenerated on every `up`, `promote`, `switch`,
+and `down` gateway reload.
+The first gateway release model supports candidate preview plus manual
+`promote`/`switch`; it does not do percentage-weighted traffic splitting.

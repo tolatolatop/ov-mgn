@@ -1,9 +1,21 @@
 import json
+from datetime import UTC, datetime
 
 from click.testing import CliRunner
 
 from ov_mgn import __version__
 from ov_mgn.cli import main
+from ov_mgn.docker import DockerClient
+from ov_mgn.server_config import (
+    ReleaseLock,
+    RuntimeServiceState,
+    RuntimeState,
+    UserServerConfig,
+    render_locked_config,
+    write_lock_file,
+    write_release_lock,
+    write_state,
+)
 
 
 def test_version_command() -> None:
@@ -151,13 +163,371 @@ def test_status_command_can_skip_docker(tmp_path) -> None:
             "--release-path",
             str(tmp_path / "release.json.lock"),
             "--state-path",
-            str(tmp_path / "state.json"),
+            str(tmp_path / "state.json.lock"),
             "--no-docker",
         ],
     )
 
     assert result.exit_code == 0
     assert '"docker": null' in result.output
+
+
+def test_status_summarizes_configured_and_planned_services(tmp_path) -> None:
+    config_path = tmp_path / "server.json"
+    lock_path = tmp_path / "server.json.lock"
+    release_path = tmp_path / "release.json.lock"
+    state_path = tmp_path / "state.json.lock"
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    _write_config(config_path, source_dir)
+    runner = CliRunner()
+
+    configured = runner.invoke(
+        main,
+        [
+            "status",
+            "--config-path",
+            str(config_path),
+            "--lock-path",
+            str(lock_path),
+            "--release-path",
+            str(release_path),
+            "--state-path",
+            str(state_path),
+            "--no-docker",
+        ],
+    )
+    plan = runner.invoke(
+        main,
+        ["plan", "--config-path", str(config_path), "--lock-path", str(lock_path)],
+    )
+    planned = runner.invoke(
+        main,
+        [
+            "status",
+            "--config-path",
+            str(config_path),
+            "--lock-path",
+            str(lock_path),
+            "--release-path",
+            str(release_path),
+            "--state-path",
+            str(state_path),
+            "--no-docker",
+        ],
+    )
+
+    assert configured.exit_code == 0, configured.output
+    assert json.loads(configured.output)["services_summary"]["alpha"]["stage"] == "configured"
+    assert plan.exit_code == 0, plan.output
+    payload = json.loads(planned.output)
+    assert payload["services_summary"]["alpha"]["stage"] == "planned"
+    assert payload["services_summary"]["alpha"]["ok"] is True
+
+
+def test_status_summarizes_candidate_and_online_services(tmp_path) -> None:
+    config_path = tmp_path / "server.json"
+    lock_path = tmp_path / "server.json.lock"
+    release_path = tmp_path / "release.json.lock"
+    state_path = tmp_path / "state.json.lock"
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    _write_config(config_path, source_dir)
+    runner = CliRunner()
+
+    plan = runner.invoke(
+        main,
+        ["plan", "--config-path", str(config_path), "--lock-path", str(lock_path)],
+    )
+    up = runner.invoke(
+        main,
+        [
+            "up",
+            "alpha",
+            "--lock-path",
+            str(lock_path),
+            "--state-path",
+            str(state_path),
+            "--dry-run",
+        ],
+    )
+    candidate = runner.invoke(
+        main,
+        [
+            "status",
+            "--config-path",
+            str(config_path),
+            "--lock-path",
+            str(lock_path),
+            "--release-path",
+            str(release_path),
+            "--state-path",
+            str(state_path),
+            "--no-docker",
+        ],
+    )
+    promote = runner.invoke(
+        main,
+        [
+            "promote",
+            "alpha",
+            "--lock-path",
+            str(lock_path),
+            "--release-path",
+            str(release_path),
+            "--state-path",
+            str(state_path),
+            "--dry-run",
+        ],
+    )
+    online = runner.invoke(
+        main,
+        [
+            "status",
+            "--config-path",
+            str(config_path),
+            "--lock-path",
+            str(lock_path),
+            "--release-path",
+            str(release_path),
+            "--state-path",
+            str(state_path),
+            "--no-docker",
+        ],
+    )
+
+    assert plan.exit_code == 0, plan.output
+    assert up.exit_code == 0, up.output
+    candidate_summary = json.loads(candidate.output)["services_summary"]["alpha"]
+    assert candidate_summary["stage"] == "candidate"
+    assert candidate_summary["ok"] is None
+    assert "docker inspection skipped" in candidate_summary["issues"]
+    assert promote.exit_code == 0, promote.output
+    online_summary = json.loads(online.output)["services_summary"]["alpha"]
+    assert online_summary["stage"] == "online"
+    assert online_summary["ok"] is None
+
+
+def test_status_marks_inconsistent_candidate_release_id(tmp_path) -> None:
+    config_path = tmp_path / "server.json"
+    lock_path = tmp_path / "server.json.lock"
+    release_path = tmp_path / "release.json.lock"
+    state_path = tmp_path / "state.json.lock"
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    _write_config(config_path, source_dir)
+    config = UserServerConfig.model_validate(json.loads(config_path.read_text(encoding="utf-8")))
+    locked = render_locked_config(config)
+    write_lock_file(locked, lock_path)
+    write_state(
+        RuntimeState(
+            updated_at=datetime(2026, 6, 14, tzinfo=UTC),
+            services={
+                "alpha": RuntimeServiceState(
+                    candidate_release_id="alpha-wrong",
+                    stable_host="127.0.0.1",
+                    stable_port=18080,
+                )
+            },
+        ),
+        state_path,
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "status",
+            "--config-path",
+            str(config_path),
+            "--lock-path",
+            str(lock_path),
+            "--release-path",
+            str(release_path),
+            "--state-path",
+            str(state_path),
+            "--no-docker",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    summary = json.loads(result.output)["services_summary"]["alpha"]
+    assert summary["stage"] == "inconsistent"
+    assert summary["ok"] is False
+    assert "candidate_release_id does not match server.json.lock" in summary["issues"]
+
+
+def test_status_marks_orphaned_service(tmp_path) -> None:
+    config_path = tmp_path / "server.json"
+    release_path = tmp_path / "release.json.lock"
+    state_path = tmp_path / "state.json.lock"
+    config_path.write_text('{"services": {}}\n', encoding="utf-8")
+    write_state(
+        RuntimeState(
+            updated_at=datetime(2026, 6, 14, tzinfo=UTC),
+            services={
+                "alpha": RuntimeServiceState(
+                    online_release_id="alpha-old",
+                    stable_host="127.0.0.1",
+                    stable_port=18080,
+                )
+            },
+        ),
+        state_path,
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "status",
+            "--config-path",
+            str(config_path),
+            "--lock-path",
+            str(tmp_path / "missing.lock"),
+            "--release-path",
+            str(release_path),
+            "--state-path",
+            str(state_path),
+            "--no-docker",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    summary = json.loads(result.output)["services_summary"]["alpha"]
+    assert summary["stage"] == "orphaned"
+    assert summary["ok"] is False
+    assert "service is not present in server.json" in summary["issues"]
+
+
+def test_status_uses_structured_docker_containers(monkeypatch, tmp_path) -> None:
+    config_path = tmp_path / "server.json"
+    lock_path = tmp_path / "server.json.lock"
+    release_path = tmp_path / "release.json.lock"
+    state_path = tmp_path / "state.json.lock"
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    _write_config(config_path, source_dir)
+    config = UserServerConfig.model_validate(json.loads(config_path.read_text(encoding="utf-8")))
+    locked = render_locked_config(config)
+    service = locked.services["alpha"]
+    write_lock_file(locked, lock_path)
+    write_release_lock(
+        ReleaseLock(updated_at=datetime(2026, 6, 14, tzinfo=UTC), services={"alpha": service}),
+        release_path,
+    )
+    write_state(
+        RuntimeState(
+            updated_at=datetime(2026, 6, 14, tzinfo=UTC),
+            services={
+                "alpha": RuntimeServiceState(
+                    candidate_release_id=service.release_id,
+                    online_release_id=service.release_id,
+                    stable_host=service.stable_host,
+                    stable_port=service.stable_port,
+                )
+            },
+        ),
+        state_path,
+    )
+    locked.gateway_config_path.parent.mkdir(parents=True, exist_ok=True)
+    locked.gateway_config_path.write_text(
+        (
+            "server {\n"
+            "    location /alpha/ {\n"
+            f"        proxy_pass http://{service.release_container_name}:1933/;\n"
+            "    }\n"
+            "    location /alpha/__candidate/ {\n"
+            f"        proxy_pass http://{service.release_container_name}:1933/;\n"
+            "    }\n"
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(DockerClient, "inspect_status", lambda self: "docker text\n")
+    monkeypatch.setattr(
+        DockerClient,
+        "inspect_containers",
+        lambda self: [
+            {
+                "name": service.release_container_name,
+                "status": "Up 3 seconds",
+                "ports": "",
+                "service": "alpha",
+                "role": "backend",
+                "release_id": service.release_id,
+                "stable_host": service.stable_host,
+                "stable_port": service.stable_port,
+            },
+        ],
+    )
+    monkeypatch.setattr(
+        DockerClient,
+        "inspect_gateway_container",
+        lambda self, container_name="ov-mgn-gateway": {
+            "name": container_name,
+            "status": "Up 2 seconds",
+            "running": True,
+            "ports": "127.0.0.1:18080->80/tcp",
+            "role": "gateway",
+        },
+    )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "status",
+            "--config-path",
+            str(config_path),
+            "--lock-path",
+            str(lock_path),
+            "--release-path",
+            str(release_path),
+            "--state-path",
+            str(state_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    summary = payload["services_summary"]["alpha"]
+    assert payload["docker"] == "docker text\n"
+    assert summary["stage"] == "candidate_pending_promotion"
+    assert summary["ok"] is True
+    assert summary["containers"]["other"][0]["name"] == service.release_container_name
+
+
+def test_status_without_runtime_state_keeps_release_lock_planned(monkeypatch, tmp_path) -> None:
+    config_path = tmp_path / "server.json"
+    release_path = tmp_path / "release.json.lock"
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    _write_config(config_path, source_dir)
+    config = UserServerConfig.model_validate(json.loads(config_path.read_text(encoding="utf-8")))
+    locked = render_locked_config(config)
+    service = locked.services["alpha"]
+    write_release_lock(
+        ReleaseLock(updated_at=datetime(2026, 6, 14, tzinfo=UTC), services={"alpha": service}),
+        release_path,
+    )
+    monkeypatch.setattr(DockerClient, "inspect_status", lambda self: "")
+    monkeypatch.setattr(DockerClient, "inspect_containers", lambda self: [])
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "status",
+            "--config-path",
+            str(config_path),
+            "--release-path",
+            str(release_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    summary = json.loads(result.output)["services_summary"]["alpha"]
+    assert summary["stage"] == "configured"
+    assert summary["ok"] is True
+    assert summary["internal"]["released_release_id"] == service.release_id
 
 
 def test_config_file_help_only_shows_minimal_commands() -> None:
@@ -353,28 +723,14 @@ def test_config_file_set_failures_preserve_existing_file(tmp_path) -> None:
             "18082",
         ],
     )
-    bad_range = runner.invoke(
-        main,
-        [
-            "config-file",
-            "set",
-            "--config-path",
-            str(config_path),
-            "defaults.port_range",
-            "[18080,18080]",
-        ],
-    )
-
     assert bad_env.exit_code != 0
     assert "env keys" in bad_env.output
     assert missing_service.exit_code != 0
     assert "config path not found" in missing_service.output
-    assert bad_range.exit_code != 0
-    assert "must not include stable_port" in bad_range.output
     assert config_path.read_text(encoding="utf-8") == original
 
 
-def test_config_file_set_rejects_duplicate_stable_port_without_writing(tmp_path) -> None:
+def test_config_file_set_rejects_duplicate_route_path_without_writing(tmp_path) -> None:
     config_path = tmp_path / "server.json"
     source_dir = tmp_path / "source"
     source_dir.mkdir()
@@ -388,13 +744,13 @@ def test_config_file_set_rejects_duplicate_stable_port_without_writing(tmp_path)
             "set",
             "--config-path",
             str(config_path),
-            "services.beta.stable_port",
-            "18080",
+            "services.beta.route_path",
+            "/alpha/",
         ],
     )
 
     assert result.exit_code != 0
-    assert "is used by both" in result.output
+    assert "route_path /alpha/" in result.output
     assert config_path.read_text(encoding="utf-8") == original
 
 
@@ -509,7 +865,10 @@ def _write_config(
     config_path.write_text(
         json.dumps(
             {
-                "defaults": {"port_range": [31000, 31999]},
+                "defaults": {
+                    "data_root": str(config_path.parent / "data"),
+                    "port_range": [31000, 31999],
+                },
                 "services": services,
             },
             indent=2,

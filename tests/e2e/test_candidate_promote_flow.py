@@ -14,7 +14,7 @@ def test_candidate_promote_flow_e2e_without_real_docker(tmp_path) -> None:
     config_path = workspace / "server.json"
     lock_path = workspace / "server.json.lock"
     release_path = workspace / "release.json.lock"
-    state_path = workspace / "state.json"
+    state_path = workspace / "state.json.lock"
     workspace.mkdir()
     source_dir.mkdir()
     (source_dir / "app.py").write_text("VERSION = 'candidate'\n", encoding="utf-8")
@@ -155,8 +155,8 @@ def test_candidate_promote_flow_e2e_without_real_docker(tmp_path) -> None:
     assert load_state(state_path).services["alpha"].candidate_release_id == service.release_id
 
     (source_dir / "app.py").write_text("VERSION = 'after-up-edit'\n", encoding="utf-8")
-    service.candidate_data_dir.mkdir(parents=True, exist_ok=True)
-    (service.candidate_data_dir / "kb.sqlite").write_text("candidate-data", encoding="utf-8")
+    service.release_data_dir.mkdir(parents=True, exist_ok=True)
+    (service.release_data_dir / "kb.sqlite").write_text("candidate-data", encoding="utf-8")
 
     promote = runner.invoke(
         main,
@@ -175,7 +175,6 @@ def test_candidate_promote_flow_e2e_without_real_docker(tmp_path) -> None:
 
     assert promote.exit_code == 0, promote.output
     assert promote.output.strip() == f"alpha online {service.release_id}"
-    assert not service.candidate_data_dir.exists()
     assert (service.release_data_dir / "kb.sqlite").read_text(encoding="utf-8") == "candidate-data"
     assert (service.code_dir / "app.py").read_text(encoding="utf-8") == "VERSION = 'candidate'\n"
     assert load_release_lock(release_path).services["alpha"].release_id == service.release_id

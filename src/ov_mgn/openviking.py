@@ -256,7 +256,7 @@ def _load_model_config(path: Path) -> dict[str, Any]:
             f"{', '.join(sorted(OPENVIKING_MODEL_SECTIONS))}; found {', '.join(unknown)}"
         )
     if not any(section in payload for section in OPENVIKING_MODEL_SECTIONS):
-        raise ValueError("model_config_file must contain at least one of embedding, vlm, bot")
+        raise ValueError("model_config_file must contain at least one of embedding, vlm")
     _validate_dense_dimension(payload)
     return payload
 

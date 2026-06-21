@@ -207,7 +207,6 @@ def edit_model_config(prompts: WizardPrompts, payload: dict[str, Any]) -> dict[s
         [
             ("embedding", "Embedding 检索模型"),
             ("vlm", "VLM 视觉/语言模型"),
-            ("bot", "Bot/Agent 模型"),
         ],
         default="embedding",
     )
@@ -401,13 +400,13 @@ def prompt_service(
 
 def prompt_model_config(prompts: WizardPrompts) -> dict[str, Any]:
     payload: dict[str, Any] = {}
-    for section in ("embedding", "vlm", "bot"):
+    for section in ("embedding", "vlm"):
         if prompts.confirm(
             _model_section_confirm_message(section), default=(section == "embedding")
         ):
             payload[section] = _prompt_model_section(prompts, section)
     if not payload:
-        raise ValueError("model.json must contain at least one of embedding, vlm, bot")
+        raise ValueError("model.json must contain at least one of embedding, vlm")
     return payload
 
 
@@ -416,7 +415,7 @@ def _model_section_confirm_message(section: str) -> str:
         return "配置用于检索/搜索的 Embedding 模型？"
     if section == "vlm":
         return "配置视觉/语言模型？"
-    return "配置 Bot/Agent 模型？"
+    return ""
 
 
 def validate_model_config_payload(payload: dict[str, Any]) -> None:
@@ -427,7 +426,7 @@ def validate_model_config_payload(payload: dict[str, Any]) -> None:
             f"{', '.join(sorted(OPENVIKING_MODEL_SECTIONS))}; found {', '.join(unknown)}"
         )
     if not any(section in payload for section in OPENVIKING_MODEL_SECTIONS):
-        raise ValueError("model.json must contain at least one of embedding, vlm, bot")
+        raise ValueError("model.json must contain at least one of embedding, vlm")
 
 
 def write_model_config(payload: dict[str, Any], path: Path) -> Path:
@@ -484,8 +483,6 @@ def _model_section_values(section: str, current: Any) -> dict[str, str]:
         return {}
     if section == "embedding":
         candidate = current.get("dense", {})
-    elif section == "bot" and isinstance(current.get("agents"), dict):
-        candidate = current["agents"]
     else:
         candidate = current
     if not isinstance(candidate, dict):
@@ -512,7 +509,7 @@ def _model_section_label(section: str) -> str:
         return "Embedding"
     if section == "vlm":
         return "VLM"
-    return "Bot/Agent"
+    return ""
 
 
 def _server_init_action(prompts: WizardPrompts, server_path: Path) -> str:

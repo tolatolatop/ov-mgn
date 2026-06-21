@@ -963,24 +963,6 @@ def test_wizard_edit_invalid_server_change_preserves_file(tmp_path, monkeypatch)
     assert config_path.read_text(encoding="utf-8") == original
 
 
-def test_wizard_edit_replaces_model_section(tmp_path) -> None:
-    model_path = _write_model_config(tmp_path)
-    prompts = FakePrompts(
-        inputs=["https://api.example.invalid/v1", "gpt-4o-mini"],
-        secrets=["bot-secret"],
-        confirms=[False, True],
-        selects=["model", "bot"],
-    )
-
-    written = run_edit_wizard(prompts, model_path=model_path)
-
-    assert written == [model_path]
-    payload = json.loads(model_path.read_text(encoding="utf-8"))
-    assert payload["bot"]["api_base"] == "https://api.example.invalid/v1"
-    assert payload["bot"]["api_key"] == "bot-secret"
-    assert payload["bot"]["model"] == "gpt-4o-mini"
-
-
 def test_wizard_edit_model_section_defaults_from_existing_config(tmp_path) -> None:
     model_path = _write_model_config(tmp_path)
     prompts = FakePrompts(

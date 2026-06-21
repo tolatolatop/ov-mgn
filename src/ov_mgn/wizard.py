@@ -452,20 +452,105 @@ def _prompt_model_section(
     ).strip()
     key = api_key or API_KEY_PLACEHOLDER
 
+    if prompts.confirm("配置高级模型参数？（超时、并发、最大 token）", default=False):
+        advanced = _prompt_advanced_model_options(prompts, section, current)
+    else:
+        advanced = {}
+
     if section == "embedding":
         dense: dict[str, Any] = {"provider": defaults["provider"], "api_key": key}
         if api_base:
             dense["api_base"] = api_base
         if model:
             dense["model"] = model
-        return {"dense": dense}
+        result: dict[str, Any] = {"dense": dense}
+        if advanced:
+            result.update(advanced)
+        return result
 
     data = {"provider": defaults["provider"], "api_key": key}
     if api_base:
         data["api_base"] = api_base
     if model:
         data["model"] = model
+    if advanced:
+        data.update(advanced)
     return data
+
+
+
+def _prompt_advanced_model_options(
+    prompts: WizardPrompts,
+    section: str,
+    current: Any = None,
+) -> dict[str, Any]:
+    """Prompt for advanced model options: timeout, max_tokens, max_concurrent.
+
+    Returns a dict of advanced fields (empty if user skips all), using OpenViking
+    defaults as fallback when no existing config value is available.
+    """
+    current = current if isinstance(current, dict) else {}
+    advanced: dict[str, Any] = {}
+
+    if section == "embedding":
+        current_value = _get_nested_int(current, raw_key="max_concurrent")
+        default_concurrent = str(current_value) if current_value is not None else "10"
+        raw = prompts.input(
+            "Embedding 最大并发请求数",
+            default=default_concurrent,
+        ).strip()
+        if raw:
+            advanced["max_concurrent"] = int(raw)
+
+    else:
+        # VLM / Bot
+        current_timeout = _get_nested_int(current, raw_key="timeout")
+        default_timeout = str(current_timeout) if current_timeout is not None else "60.0"
+        raw = prompts.input(
+            f"{_model_section_label(section)} 请求超时（秒）",
+            default=default_timeout,
+        ).strip()
+        if raw:
+            advanced["timeout"] = float(raw)
+
+        current_max_tokens = _get_nested_int(current, raw_key="max_tokens")
+        default_max_tokens = str(current_max_tokens) if current_max_tokens is not None else ""
+        raw = prompts.input(
+            f"{_model_section_label(section)} 最大输出 token（留空=provider 默认）",
+            default=default_max_tokens,
+        ).strip()
+        if raw:
+            advanced["max_tokens"] = int(raw)
+
+        current_concurrent = _get_nested_int(current, raw_key="max_concurrent")
+        default_concurrent = str(current_concurrent) if current_concurrent is not None else "100"
+        raw = prompts.input(
+            f"{_model_section_label(section)} 最大并发请求数",
+            default=default_concurrent,
+        ).strip()
+        if raw:
+            advanced["max_concurrent"] = int(raw)
+
+    return advanced
+
+
+def _get_nested_int(data: dict[str, Any], raw_key: str) -> int | None:
+    """Extract an int value from a possibly-nested dict.
+
+    For embedding section, current could be e.g. {"dense": {...}, "max_concurrent": 10}.
+    This checks both top-level and nested keys.
+    """
+    if raw_key in data:
+        val = data[raw_key]
+        if isinstance(val, (int, float)) and not isinstance(val, bool):
+            return int(val)
+    for subkey in ("dense",):
+        sub = data.get(subkey)
+        if isinstance(sub, dict) and raw_key in sub:
+            val = sub[raw_key]
+            if isinstance(val, (int, float)) and not isinstance(val, bool):
+                return int(val)
+    return None
 
 
 def _model_section_prompt_defaults(section: str, current: Any) -> dict[str, str]:

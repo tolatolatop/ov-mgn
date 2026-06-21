@@ -727,7 +727,7 @@ def test_wizard_init_existing_files_default_skip_preserves_files(tmp_path) -> No
     config_path = tmp_path / "server.json"
     model_path = tmp_path / "model.json"
     config_path.write_text('{"services": {}}\n', encoding="utf-8")
-    model_path.write_text('{"embedding": {"dense": {"api_key": "old"}}}\n', encoding="utf-8")
+    model_path.write_text('{"embedding": {"dense": {"api_key": "***"}}}\n', encoding="utf-8")
     original_config = config_path.read_text(encoding="utf-8")
     original_model = model_path.read_text(encoding="utf-8")
     prompts = FakePrompts(selects=["skip", "skip"])
@@ -767,7 +767,7 @@ def test_wizard_init_can_append_service_and_rewrite_model_after_confirm(tmp_path
     source_dir = tmp_path / "source"
     source_dir.mkdir()
     _write_config(config_path, source_dir)
-    model_path.write_text('{"embedding": {"dense": {"api_key": "old"}}}\n', encoding="utf-8")
+    model_path.write_text('{"embedding": {"dense": {"api_key": "***"}}}\n', encoding="utf-8")
     prompts = FakePrompts(
         inputs=[
             "beta",
@@ -967,7 +967,7 @@ def test_wizard_edit_model_section_defaults_from_existing_config(tmp_path) -> No
     model_path = _write_model_config(tmp_path)
     prompts = FakePrompts(
         inputs=["https://api.example.invalid/v2", "text-embedding-3-large"],
-        confirms=[False, True],
+        confirms=[False, False, True],
         selects=["model", "embedding"],
     )
 
@@ -976,7 +976,7 @@ def test_wizard_edit_model_section_defaults_from_existing_config(tmp_path) -> No
     assert written == [model_path]
     payload = json.loads(model_path.read_text(encoding="utf-8"))
     assert payload["embedding"]["dense"]["api_base"] == "https://api.example.invalid/v2"
-    assert payload["embedding"]["dense"]["api_key"] == "secret"
+    assert payload["embedding"]["dense"]["api_key"] == "***"
     assert payload["embedding"]["dense"]["model"] == "text-embedding-3-large"
 
 
@@ -996,7 +996,7 @@ def test_wizard_edit_can_stage_server_and_model_before_saving(tmp_path) -> None:
             "text-embedding-3-large",
         ],
         secrets=["bulk-secret"],
-        confirms=[True, True, False, True, True],
+        confirms=[True, True, False, False, True, True],
         selects=["server", "service", "alpha", "local", "model", "embedding"],
     )
 
@@ -1432,7 +1432,7 @@ def _write_config(
 def _write_model_config(path):
     model_config = path / "model.json"
     model_config.write_text(
-        json.dumps({"embedding": {"dense": {"provider": "openai", "api_key": "secret"}}}),
+        json.dumps({"embedding": {"dense": {"provider": "openai", "api_key": "***"}}}),
         encoding="utf-8",
     )
     return model_config

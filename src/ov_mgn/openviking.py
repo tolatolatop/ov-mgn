@@ -221,6 +221,24 @@ exec /app/.venv/bin/ov "$@"
     wrapper.chmod(0o755)
 
 
+def _validate_dense_dimension(payload: dict[str, Any]) -> None:
+    """Validate embedding.dense.dimension if present (advanced config)."""
+    embedding = payload.get("embedding")
+    if not isinstance(embedding, dict):
+        return
+    dense = embedding.get("dense")
+    if not isinstance(dense, dict):
+        return
+    if "dimension" not in dense:
+        return
+    dim = dense["dimension"]
+    if not isinstance(dim, int) or isinstance(dim, bool) or dim <= 0:
+        raise ValueError(
+            "embedding.dense.dimension must be a positive integer; "
+            f"got {dim!r}"
+        )
+
+
 def _load_model_config(path: Path) -> dict[str, Any]:
     model_config_path = path.expanduser()
     if not model_config_path.exists() or not model_config_path.is_file():
@@ -239,6 +257,7 @@ def _load_model_config(path: Path) -> dict[str, Any]:
         )
     if not any(section in payload for section in OPENVIKING_MODEL_SECTIONS):
         raise ValueError("model_config_file must contain at least one of embedding, vlm, bot")
+    _validate_dense_dimension(payload)
     return payload
 
 

@@ -226,10 +226,13 @@ def test_gateway_up_starts_backend_and_writes_candidate_route(tmp_path) -> None:
     assert "-candidate-" not in service.release_container_name
 
 
-def test_gateway_up_bootstraps_openviking_user_key_and_recreates_backend(tmp_path) -> None:
+def test_gateway_up_uses_configured_root_key_and_recreates_backend(tmp_path) -> None:
     user_env = tmp_path / "user.env"
     user_env.write_text("CUSTOM_SECRET=value\nVIKINGBOT_API_KEY=old\n", encoding="utf-8")
-    locked = render_locked_config(_gateway_config(tmp_path, secret_env_file=user_env))
+    config_path = tmp_path / "server.json"
+    config = _gateway_config(tmp_path, secret_env_file=user_env, root_api_key="shared-root")
+    config_path.write_text(config.model_dump_json(), encoding="utf-8")
+    locked = render_locked_config(config, source=config_path)
     service = locked.services["alpha"]
     lock_path = write_lock_file(locked, tmp_path / "server.json.lock")
     release_path = tmp_path / "release.json.lock"
@@ -250,29 +253,29 @@ def test_gateway_up_bootstraps_openviking_user_key_and_recreates_backend(tmp_pat
     assert docker.stopped == []
     assert docker.health_waits == [service.release_container_name]
     assert docker.settles == [5]
-    assert docker.execs == [
-        ["ov", "admin", "register-user", "default", "default", "-o", "json"],
-    ]
-    assert docker.backend_secret_env_files == [str(user_env)]
-    assert ovcli["api_key"] == "user-key-from-register"
+    assert docker.execs == []
+    assert docker.backend_secret_env_files == [str(service.config_dir / "runtime.env")]
+    assert ovcli["api_key"] == "shared-root"
     assert ovcli["account"] == "default"
     assert ovcli["user"] == "default"
     assert "CUSTOM_SECRET=value" in runtime_env
     assert "VIKINGBOT_ENDPOINT=http://127.0.0.1:1933/bot/v1" in runtime_env
-    assert "VIKINGBOT_API_KEY" not in runtime_env
+    assert "VIKINGBOT_API_KEY=shared-root" in runtime_env
     wrapper = service.config_dir / "bin" / "ov"
     assert wrapper.exists()
     wrapper_text = wrapper.read_text(encoding="utf-8")
     assert "/app/config/openviking.conf" in wrapper_text
-    assert "regenerate-key default default" in wrapper_text
+    assert "regenerate-key default default" not in wrapper_text
 
 
-def test_gateway_up_regenerates_key_when_user_already_exists(tmp_path) -> None:
-    locked = render_locked_config(_gateway_config(tmp_path))
+def test_gateway_up_uses_same_configured_root_key_for_each_service(tmp_path) -> None:
+    config_path = tmp_path / "server.json"
+    config = _gateway_config(tmp_path, root_api_key="shared-root")
+    config_path.write_text(config.model_dump_json(), encoding="utf-8")
+    locked = render_locked_config(config, source=config_path)
     service = locked.services["alpha"]
     lock_path = write_lock_file(locked, tmp_path / "server.json.lock")
     docker = FakeGatewayDocker()
-    docker.register_user_returncode = 1
 
     up_service(
         "alpha",
@@ -283,11 +286,12 @@ def test_gateway_up_regenerates_key_when_user_already_exists(tmp_path) -> None:
     )
 
     ovcli = json.loads(service.openviking.cli_config_file.read_text(encoding="utf-8"))
-    assert docker.execs == [
-        ["ov", "admin", "register-user", "default", "default", "-o", "json"],
-        ["ov", "admin", "regenerate-key", "default", "default", "-o", "json"],
-    ]
-    assert ovcli["api_key"] == "user-key-from-regenerate"
+    rendered = json.loads(service.openviking.config_file.read_text(encoding="utf-8"))
+    runtime_env = (service.config_dir / "runtime.env").read_text(encoding="utf-8")
+    assert docker.execs == []
+    assert ovcli["api_key"] == "shared-root"
+    assert rendered["server"]["root_api_key"] == "shared-root"
+    assert "VIKINGBOT_API_KEY=shared-root" in runtime_env
 
 
 def test_branch_service_first_up_copies_parent_online_data(tmp_path) -> None:
@@ -415,7 +419,12 @@ def _now() -> datetime:
     return datetime(2026, 6, 14, tzinfo=UTC)
 
 
-def _gateway_config(tmp_path, template_path=None, secret_env_file=None) -> UserServerConfig:
+def _gateway_config(
+    tmp_path,
+    template_path=None,
+    secret_env_file=None,
+    root_api_key=None,
+) -> UserServerConfig:
     source = tmp_path / "source"
     source.mkdir(exist_ok=True)
     model_config = tmp_path / "model.json"
@@ -428,6 +437,8 @@ def _gateway_config(tmp_path, template_path=None, secret_env_file=None) -> UserS
         "openviking": {"model_config_file": str(model_config)},
         "gateway": {"enabled": True, "port": 18080},
     }
+    if root_api_key:
+        defaults["openviking"]["root_api_key"] = root_api_key
     if secret_env_file:
         defaults["secret_env_file"] = str(secret_env_file)
     service = {

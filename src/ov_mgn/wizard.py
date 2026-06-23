@@ -1,5 +1,6 @@
 import json
 import os
+import secrets
 import tempfile
 from pathlib import Path
 from typing import Any, Protocol
@@ -129,7 +130,12 @@ def run_init_wizard(
     server_action = _server_init_action(prompts, server_path)
     if server_action == "create":
         config = UserServerConfig(
-            defaults={"openviking": {"model_config_file": resolved_model_path}},
+            defaults={
+                "openviking": {
+                    "model_config_file": resolved_model_path,
+                    "root_api_key": _prompt_root_api_key(prompts),
+                }
+            },
             services={},
         )
         if prompts.confirm("现在配置第一个服务？", default=True):
@@ -237,6 +243,7 @@ def edit_server_defaults(prompts: WizardPrompts, payload: dict[str, Any]) -> dic
 def prompt_server_defaults(prompts: WizardPrompts, defaults: ServerDefaults) -> ServerDefaults:
     image = prompts.input("默认 OpenViking 镜像", default=defaults.image).strip()
     data_root = prompts.path("数据目录", default=str(defaults.data_root)).strip()
+    root_api_key = _prompt_root_api_key(prompts, default=defaults.openviking.root_api_key)
     secret_env_file = prompts.path(
         "Docker secret env 文件（留空跳过）",
         default=str(defaults.secret_env_file) if defaults.secret_env_file else "",
@@ -250,6 +257,7 @@ def prompt_server_defaults(prompts: WizardPrompts, defaults: ServerDefaults) -> 
         "secret_env_file": secret_env_file or None,
         "openviking": {
             "model_config_file": defaults.openviking.model_config_file,
+            "root_api_key": root_api_key,
         },
         "gateway": defaults.gateway.model_dump(mode="json"),
         "port_range": defaults.port_range,
@@ -277,7 +285,10 @@ def prompt_server_defaults(prompts: WizardPrompts, defaults: ServerDefaults) -> 
         values.update(
             {
                 "backend_port": int(backend_port),
-                "openviking": {"model_config_file": model_config_file},
+                "openviking": {
+                    "model_config_file": model_config_file,
+                    "root_api_key": root_api_key,
+                },
                 "gateway": {
                     "enabled": True,
                     "host": gateway_host,
@@ -290,6 +301,15 @@ def prompt_server_defaults(prompts: WizardPrompts, defaults: ServerDefaults) -> 
         )
 
     return ServerDefaults.model_validate(values)
+
+
+def _prompt_root_api_key(prompts: WizardPrompts, default: str | None = None) -> str:
+    generated = secrets.token_urlsafe(32)
+    value = prompts.secret(
+        "OpenViking 统一访问 Token（所有服务共用，回车自动生成/沿用）",
+        default=default or generated,
+    ).strip()
+    return value or default or generated
 
 
 def edit_server_service(prompts: WizardPrompts, payload: dict[str, Any]) -> dict[str, Any]:

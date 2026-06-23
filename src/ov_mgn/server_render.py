@@ -4,7 +4,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from ov_mgn.logging import get_logger
-from ov_mgn.openviking import render_managed_openviking_config, render_openviking_cli_wrapper
+from ov_mgn.openviking import (
+    render_managed_openviking_config_with_key,
+    render_openviking_cli_wrapper,
+)
 from ov_mgn.server_config import (
     LockedOpenViking,
     LockedServerConfig,
@@ -61,7 +64,7 @@ def render_locked_config(
     )
 
 
-def materialize_service(service: LockedServiceSpec) -> None:
+def materialize_service(service: LockedServiceSpec, *, root_api_key: str | None = None) -> None:
     logger.debug(
         "materializing service release_id=%s code_dir=%s config_dir=%s candidate_data_dir=%s "
         "release_data_dir=%s",
@@ -85,7 +88,7 @@ def materialize_service(service: LockedServiceSpec) -> None:
             shutil.rmtree(service.code_dir)
         shutil.copytree(service.source.original_path.expanduser(), service.code_dir)
 
-    render_managed_openviking_config(service)
+    render_managed_openviking_config_with_key(service, root_api_key=root_api_key)
     render_openviking_cli_wrapper(service)
 
 

@@ -273,6 +273,37 @@ def test_verbose_plan_logs_do_not_include_sensitive_model_content(tmp_path) -> N
         assert sensitive not in result.stderr
 
 
+def test_plan_backfills_shared_openviking_root_key_without_locking_secret(tmp_path) -> None:
+    config_path = tmp_path / "server.json"
+    lock_path = tmp_path / "server.json.lock"
+    model_config = _write_model_config(tmp_path)
+    config_path.write_text(
+        json.dumps(
+            {
+                "defaults": {"openviking": {"model_config_file": str(model_config)}},
+                "services": {
+                    "alpha": {
+                        "stable_port": 18080,
+                        "source": {"type": "local", "path": "."},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        main,
+        ["plan", "--config-path", str(config_path), "--lock-path", str(lock_path)],
+    )
+
+    assert result.exit_code == 0, result.output
+    server = json.loads(config_path.read_text(encoding="utf-8"))
+    root_api_key = server["defaults"]["openviking"]["root_api_key"]
+    assert root_api_key
+    assert root_api_key not in lock_path.read_text(encoding="utf-8")
+
+
 def test_status_command_can_skip_docker(tmp_path) -> None:
     config_path = tmp_path / "server.json"
     config_path.write_text('{"services": {}}\n', encoding="utf-8")
@@ -712,6 +743,7 @@ def test_wizard_init_creates_server_and_model_config(tmp_path) -> None:
     server = json.loads(config_path.read_text(encoding="utf-8"))
     alpha = server["services"]["alpha"]
     assert server["defaults"]["openviking"]["model_config_file"] == str(model_path)
+    assert server["defaults"]["openviking"]["root_api_key"]
     assert alpha["source"]["type"] == "local"
     assert alpha["source"]["path"] == str(source_dir)
     assert alpha["route_path"] == "/alpha/"
@@ -884,6 +916,7 @@ def test_wizard_edit_updates_basic_defaults_without_advanced_prompts(tmp_path) -
     assert payload["defaults"]["secret_env_file"] == str(tmp_path / "secrets.env")
     assert payload["defaults"]["backend_port"] == 1933
     assert payload["defaults"]["openviking"]["model_config_file"].endswith("model.json")
+    assert payload["defaults"]["openviking"]["root_api_key"]
     assert payload["defaults"]["gateway"]["host"] == "127.0.0.1"
     assert payload["defaults"]["gateway"]["port"] == 18080
 
@@ -1053,12 +1086,14 @@ def test_config_file_show_and_validate(tmp_path) -> None:
 
 def test_config_edit_helpers_read_write_and_unset_paths() -> None:
     payload = {
-        "defaults": {"image": "default:1"},
+        "defaults": {"image": "default:1", "openviking": {}},
         "services": {"alpha": {"openviking": {"env": {}, "vars": {}}, "image": "old"}},
     }
 
+    set_config_path(payload, "defaults.openviking.root_api_key", "shared-root")
     set_config_path(payload, "services.alpha.openviking.env.TZ", parse_json_value('"UTC"'))
     set_config_path(payload, "services.alpha.image", "new")
+    assert get_config_path(payload, "defaults.openviking.root_api_key") == "shared-root"
     assert get_config_path(payload, "services.alpha.openviking.env.TZ") == "UTC"
     assert get_config_path(payload, "services.alpha.image") == "new"
 

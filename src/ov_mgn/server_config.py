@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import secrets
 import tempfile
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -103,6 +104,17 @@ class OpenVikingDefaults(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     model_config_file: Path = Field(default=Path("~/.ov_mgn/model.json"))
+    root_api_key: str | None = Field(default=None)
+
+    @field_validator("root_api_key")
+    @classmethod
+    def validate_root_api_key(cls, value: str | None) -> str | None:
+        if value is None:
+            return value
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("root_api_key must be non-empty")
+        return stripped
 
 
 class BranchSpec(BaseModel):
@@ -314,6 +326,21 @@ def save_user_server_config(config: UserServerConfig, path: Path | None = None) 
     return _write_user_json_atomic(validated, config_path)
 
 
+def ensure_user_server_root_api_key(
+    config: UserServerConfig,
+    path: Path | None = None,
+) -> UserServerConfig:
+    if config.defaults.openviking.root_api_key:
+        return config
+    openviking = config.defaults.openviking.model_copy(
+        update={"root_api_key": secrets.token_urlsafe(32)}
+    )
+    defaults = config.defaults.model_copy(update={"openviking": openviking})
+    updated = UserServerConfig.model_validate(config.model_copy(update={"defaults": defaults}))
+    save_user_server_config(updated, path)
+    return updated
+
+
 def save_user_server_config_data(data: dict[str, Any], path: Path | None = None) -> Path:
     UserServerConfig.model_validate(data)
     return _write_user_json_data_atomic(data, path or get_server_config_path())
@@ -391,10 +418,10 @@ def write_state(config: RuntimeState, path: Path | None = None) -> Path:
     return state_path
 
 
-def materialize_service(service: LockedServiceSpec) -> None:
+def materialize_service(service: LockedServiceSpec, *, root_api_key: str | None = None) -> None:
     from ov_mgn.server_render import materialize_service as _materialize_service
 
-    _materialize_service(service)
+    _materialize_service(service, root_api_key=root_api_key)
 
 
 def configure_openviking_user(

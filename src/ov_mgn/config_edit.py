@@ -76,6 +76,13 @@ def is_openviking_map_path(parts: list[str]) -> bool:
 def is_optional_config_field(parts: list[str]) -> bool:
     if len(parts) == 2 and parts[0] == "defaults" and parts[1] == "secret_env_file":
         return True
+    if (
+        len(parts) == 3
+        and parts[0] == "defaults"
+        and parts[1] == "openviking"
+        and parts[2] == "root_api_key"
+    ):
+        return True
     if len(parts) == 3 and parts[0] == "services" and parts[2] == "image":
         return True
     if len(parts) == 3 and parts[0] == "services" and parts[2] == "route_path":

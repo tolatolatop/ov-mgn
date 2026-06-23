@@ -6,8 +6,9 @@
 - `server.json`：服务托管配置，例如镜像、端口、源码、网关和附加环境变量。
 - `model.json`：模型相关敏感配置，例如 embedding、VLM、bot agents。
 
-`ov-mgn` 会自动生成完整的 `/app/config/openviking.conf`，包括 `server`、`storage`
-和 release-local `root_api_key`。不要再维护整份 OpenViking 模板。
+`ov-mgn` 会自动生成完整的 `/app/config/openviking.conf`，包括 `server` 和 `storage`。
+所有服务共用 `server.json` 中的统一 OpenViking 访问 Token，不要再维护整份 OpenViking
+模板。
 
 ## 1. 快速启动
 
@@ -40,10 +41,11 @@ uv run ov-mgn wizard init
 key 可以留空，向导会写入 `replace-me` 占位值，之后再编辑成真实值。所有向导写入前
 都会再次询问是否确认写入；选择 no 不会修改文件。
 
-`wizard init` 的主流程只覆盖首次可运行所需的基础项：是否创建首个服务、服务源码位置、
-以及需要哪些模型能力。route path、服务级镜像、Git ref、gateway、backend 端口等不常
-改的内容放在高级确认或 `wizard edit` 里。源码目录、数据目录、模型配置文件和 secret
-env 文件等路径输入支持 Tab 自动补全。
+`wizard init` 的主流程只覆盖首次可运行所需的基础项：统一 OpenViking 访问 Token、是否
+创建首个服务、服务源码位置，以及需要哪些模型能力。Token 可以直接回车自动生成；route
+path、服务级镜像、Git ref、gateway、backend 端口等不常改的内容放在高级确认或
+`wizard edit` 里。源码目录、数据目录、模型配置文件和 secret env 文件等路径输入支持
+Tab 自动补全。
 
 后续追加普通服务可以使用：
 
@@ -58,11 +60,12 @@ uv run ov-mgn wizard edit
 ```
 
 `wizard edit` 会先选择 `server` 或 `model`。编辑 `server.json` 时继续分成
-`defaults` 和 `service`：默认配置默认只询问默认镜像、数据目录和可选 secret env；
-只有确认需要高级选项后，才会继续询问模型配置文件、backend 端口、gateway 绑定、网络
-和 candidate 端口范围。服务配置默认只询问服务名和源码位置；只有确认需要高级服务选项
-后，才会继续询问 Git ref、route path 和服务级镜像。编辑已有服务时，默认值来自当前
-配置，未进入高级选项则保留已有高级字段。写入前仍复用现有 schema 校验。编辑
+`defaults` 和 `service`：默认配置默认只询问默认镜像、数据目录、统一访问 Token 和可选
+secret env；只有确认需要高级选项后，才会继续询问模型配置文件、backend 端口、gateway
+绑定、网络和 candidate 端口范围。服务配置默认只询问服务名和源码位置；只有确认需要
+高级服务选项后，才会继续询问 Git ref、route path 和服务级镜像。编辑已有服务时，
+默认值来自当前配置，未进入高级选项则保留已有高级字段。写入前仍复用现有 schema 校验。
+编辑
 `model.json` 时先选择 `embedding`、`vlm` 或 `bot`，再按 API URL、API key、模型名的
 顺序填写；默认值来自当前配置。每次修改后可以选择继续修改，返回 `server` / `model`
 选择列表；结束修改后再统一确认写入已改过的配置文件。
@@ -405,13 +408,9 @@ docker exec "$container" ov ls viking:// -l 256 -n 256
 docker exec "$container" ov chat -m "你好"
 ```
 
-wrapper 会用 `server.root_api_key` 刷新本次命令使用的 `default/default` 普通用户 key，
-再设置 `OPENVIKING_CLI_CONFIG_FILE` 和 `VIKINGBOT_API_KEY` 后调用镜像自带的
-`/app/.venv/bin/ov`。
-
-不要并发执行多个容器内 `ov` 命令。wrapper 会刷新同一个 `default/default` 用户 key；
-并发命令可能出现一个命令刚拿到的 key 被另一个命令刷新失效，表现为
-`Invalid API Key`。
+wrapper 会读取 `/app/config/openviking.conf` 中的 `server.root_api_key`，设置
+`VIKINGBOT_API_KEY` 后调用镜像自带的 `/app/.venv/bin/ov`。这个 root token 来自
+`server.json` 的 `defaults.openviking.root_api_key`，所有服务保持一致。
 
 ### 4.3 导入源码作为 resources
 

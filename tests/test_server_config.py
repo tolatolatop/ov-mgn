@@ -285,6 +285,37 @@ def test_materialize_service_preserves_existing_root_api_key(tmp_path) -> None:
     assert payload["server"]["root_api_key"] == "existing-root"
 
 
+def test_materialize_service_prefers_configured_root_api_key(tmp_path) -> None:
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    model_config = _write_model_config(tmp_path)
+    config = UserServerConfig.model_validate(
+        {
+            "defaults": {
+                "data_root": str(tmp_path / "data"),
+                "openviking": {"model_config_file": str(model_config)},
+            },
+            "services": {
+                "alpha": {
+                    "stable_port": 18080,
+                    "source": {"type": "local", "path": str(source_dir)},
+                }
+            },
+        }
+    )
+    service = render_locked_config(config).services["alpha"]
+    service.openviking.config_file.parent.mkdir(parents=True)
+    service.openviking.config_file.write_text(
+        json.dumps({"server": {"root_api_key": "old-release-root"}}),
+        encoding="utf-8",
+    )
+
+    materialize_service(service, root_api_key="shared-root")
+
+    payload = json.loads(service.openviking.config_file.read_text(encoding="utf-8"))
+    assert payload["server"]["root_api_key"] == "shared-root"
+
+
 def test_lock_does_not_include_secret_file_contents(tmp_path) -> None:
     secret_file = tmp_path / "secrets.env"
     secret_file.write_text("TOKEN=super-secret\n", encoding="utf-8")

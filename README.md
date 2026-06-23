@@ -154,7 +154,9 @@ pointing at a private JSON file, normally `~/.ov_mgn/model.json`. That file may
 only contain `embedding`, `vlm`, and `bot` top-level sections. `ov-mgn`
 generates the rest of `/app/config/openviking.conf`, including
 `server.host=0.0.0.0`, `server.port=defaults.backend_port`,
-`storage.workspace=/app/data`, and a release-local `server.root_api_key`.
+`storage.workspace=/app/data`, and `server.root_api_key` from
+`defaults.openviking.root_api_key`. If an older `server.json` does not contain
+that token, `plan` generates one and writes it back to `server.json`.
 `OPENVIKING_CONFIG_FILE=/app/config/openviking.conf` is injected into the
 container automatically; do not set it in `openviking.env`.
 
@@ -196,11 +198,10 @@ The first gateway release model supports candidate preview plus manual
 
 Backend containers also include a release-local `ov` wrapper at
 `/app/config/bin/ov`. It is placed before the image's native CLI in `PATH` and
-refreshes a temporary `default/default` user key for ordinary `ov` commands, so
-commands such as `docker exec <container> ov ls ...` and
-`docker exec <container> ov chat ...` do not require operators to maintain a
-static user API key. Run container-side `ov` commands serially; concurrent
-commands can invalidate each other's temporary key.
+uses the shared `server.root_api_key` for ordinary `ov` commands, so commands
+such as `docker exec <container> ov ls ...` and
+`docker exec <container> ov chat ...` use the same token across all managed
+services.
 
 To import a deployed release's source into OpenViking resources, run
 `ov add-resource /app/code --to viking://resources/{service}-code` inside the

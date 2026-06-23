@@ -38,19 +38,28 @@ def validate_openviking_model_config(config: UserServerConfig) -> None:
 
 
 def render_managed_openviking_config(service: LockedServiceSpec) -> None:
+    render_managed_openviking_config_with_key(service, root_api_key=None)
+
+
+def render_managed_openviking_config_with_key(
+    service: LockedServiceSpec,
+    *,
+    root_api_key: str | None,
+) -> None:
     if service.openviking.template_path is not None:
         raise ValueError(
             "openviking.template_path is deprecated; remove it and use "
             "defaults.openviking.model_config_file"
         )
     existing_root_key = _existing_root_api_key(service.openviking.config_file)
-    root_api_key = existing_root_key or secrets.token_urlsafe(32)
+    resolved_root_api_key = root_api_key or existing_root_key or secrets.token_urlsafe(32)
     logger.debug(
         "rendering OpenViking config service_release=%s config_dir=%s model_config_file=%s "
-        "reused_root_key=%s",
+        "shared_root_key=%s reused_root_key=%s",
         service.release_id,
         service.config_dir,
         service.openviking.model_config_file,
+        bool(root_api_key),
         bool(existing_root_key),
     )
     model_config = _load_model_config(service.openviking.model_config_file)
@@ -58,7 +67,7 @@ def render_managed_openviking_config(service: LockedServiceSpec) -> None:
         "server": {
             "host": "0.0.0.0",
             "port": service.backend_port,
-            "root_api_key": root_api_key,
+            "root_api_key": resolved_root_api_key,
         },
         "storage": {
             "workspace": "/app/data",
@@ -106,6 +115,7 @@ def configure_openviking_user(
         service.secret_env_file,
         {
             "VIKINGBOT_ENDPOINT": f"http://127.0.0.1:{service.backend_port}/bot/v1",
+            "VIKINGBOT_API_KEY": api_key,
         },
     )
     runtime_env_file.write_text(runtime_env_text, encoding="utf-8")
@@ -160,58 +170,17 @@ if [ "${{1:-}}" = "admin" ]; then
   exec /app/.venv/bin/ov "$@"
 fi
 
-root_config="/tmp/ov-mgn-root-ovcli.conf"
-user_config="/tmp/ov-mgn-user-ovcli.conf"
-python - <<'PY' "$root_config" 2>/dev/null || true
+api_key="$(python - <<'PY' 2>/dev/null || true
 import json
-import sys
 try:
     config = json.load(open('/app/config/openviking.conf'))
-    json.dump(
-        {{
-            'url': 'http://127.0.0.1:{service.backend_port}',
-            'api_key': config['server']['root_api_key'],
-            'account': 'default',
-            'user': 'default',
-        }},
-        open(sys.argv[1], 'w'),
-    )
-except Exception:
-    pass
-PY
-
-api_key=""
-if [ -s "$root_config" ]; then
-  bootstrap_json="$(OPENVIKING_CLI_CONFIG_FILE="$root_config" \\
-    /app/.venv/bin/ov admin regenerate-key default default -o json 2>/dev/null || true)"
-  api_key="$(BOOTSTRAP_JSON="$bootstrap_json" python - <<'PY' 2>/dev/null || true
-import json
-import os
-try:
-    payload = json.loads(os.environ.get('BOOTSTRAP_JSON', ''))
-    print(payload.get('result', {{}}).get('user_key', ''))
+    print(config.get('server', {{}}).get('root_api_key', ''))
 except Exception:
     pass
 PY
 )"
-fi
-
 if [ -n "$api_key" ]; then
-  python - <<'PY' "$user_config" "$api_key" 2>/dev/null || true
-import json
-import sys
-json.dump(
-    {{
-        'url': 'http://127.0.0.1:{service.backend_port}',
-        'api_key': sys.argv[2],
-        'account': 'default',
-        'user': 'default',
-    }},
-    open(sys.argv[1], 'w'),
-)
-PY
-  export OPENVIKING_CLI_CONFIG_FILE="$user_config"
-  export VIKINGBOT_API_KEY="$api_key"
+  export VIKINGBOT_API_KEY="${{VIKINGBOT_API_KEY:-$api_key}}"
 fi
 export VIKINGBOT_ENDPOINT="${{VIKINGBOT_ENDPOINT:-http://127.0.0.1:{service.backend_port}/bot/v1}}"
 exec /app/.venv/bin/ov "$@"
@@ -233,10 +202,7 @@ def _validate_dense_dimension(payload: dict[str, Any]) -> None:
         return
     dim = dense["dimension"]
     if not isinstance(dim, int) or isinstance(dim, bool) or dim <= 0:
-        raise ValueError(
-            "embedding.dense.dimension must be a positive integer; "
-            f"got {dim!r}"
-        )
+        raise ValueError(f"embedding.dense.dimension must be a positive integer; got {dim!r}")
 
 
 def _load_model_config(path: Path) -> dict[str, Any]:

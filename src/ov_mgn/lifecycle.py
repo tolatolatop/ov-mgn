@@ -10,9 +10,11 @@ from ov_mgn.server_config import (
     LockedServiceSpec,
     ReleaseLock,
     RuntimeServiceState,
+    configure_openviking_user,
     load_locked_config,
     load_release_lock,
     load_state,
+    load_user_server_config,
     materialize_service,
     write_release_lock,
     write_state,
@@ -41,7 +43,11 @@ def up_service(
     if not service.enabled:
         raise ValueError(f"service {service_name} is disabled")
 
-    materialize_service(service)
+    root_api_key = _load_configured_root_api_key(locked)
+    materialize_service(service, root_api_key=root_api_key)
+    if root_api_key:
+        service = configure_openviking_user(service, api_key=root_api_key)
+        locked.services[service_name] = service
     client = docker or DockerClient()
     release = load_release_lock(release_path)
     state = load_state(state_path)
@@ -72,6 +78,15 @@ def up_service(
     _reload_gateway(locked=locked, release=release, state=state, client=client)
     logger.debug("lifecycle up complete service=%s release_id=%s", service_name, service.release_id)
     return service.release_id, service.candidate_port
+
+
+def _load_configured_root_api_key(locked: LockedServerConfig) -> str | None:
+    try:
+        config = load_user_server_config(locked.source)
+    except (OSError, ValueError):
+        logger.debug("shared OpenViking root key unavailable source=%s", locked.source)
+        return None
+    return config.defaults.openviking.root_api_key
 
 
 def promote_service(

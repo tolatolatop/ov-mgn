@@ -62,6 +62,7 @@ Git source 最小配置：
 | `defaults.image` | 默认值 | `ghcr.io/volcengine/openviking:latest` | 所有服务默认使用的 OpenViking 镜像。服务级 `image` 可覆盖。 |
 | `defaults.data_root` | 默认值 | `~/.ov_mgn/data` | release、candidate data、网关配置的根目录。 |
 | `defaults.openviking.model_config_file` | 默认值 | `~/.ov_mgn/model.json` | `model.json` 路径。只要配置了服务，`config-file validate` 和 `plan` 都会校验该文件。 |
+| `defaults.openviking.root_api_key` | 默认值、敏感配置 | `wizard init` 或 `plan` 自动生成 | 所有 OpenViking 服务共用的访问 Token。`wizard edit` 可修改；写入 `server.json`，不写入 lock/status。 |
 | `defaults.gateway.host` | 默认值 | `127.0.0.1` | Nginx gateway 绑定 host。 |
 | `defaults.gateway.port` | 默认值 | `18080` | Nginx gateway 绑定端口。 |
 | `services.<name>` | 必须提供 | 无 | 服务名是 map key，必须匹配 `[A-Za-z][A-Za-z0-9_-]*`。 |
@@ -83,7 +84,8 @@ Git source 最小配置：
     "image": "ghcr.io/volcengine/openviking:latest",
     "data_root": "~/.ov_mgn/data",
     "openviking": {
-      "model_config_file": "~/.ov_mgn/model.json"
+      "model_config_file": "~/.ov_mgn/model.json",
+      "root_api_key": "replace-with-a-long-random-token"
     },
     "gateway": {
       "host": "127.0.0.1",
@@ -230,7 +232,7 @@ Git source 最小配置：
   "server": {
     "host": "0.0.0.0",
     "port": 1933,
-    "root_api_key": "<ov-mgn generated>"
+    "root_api_key": "<defaults.openviking.root_api_key>"
   },
   "storage": {
     "workspace": "/app/data",
@@ -261,8 +263,9 @@ Git source 最小配置：
 - `OPENVIKING_CLI_CONFIG_FILE=/app/config/ovcli.conf`
 - `PATH=/app/config/bin:...`
 
-`server.root_api_key` 由 `ov-mgn` 自动生成并保存在 release 配置目录，不写入
-`server.json`。
+`server.root_api_key` 来自 `server.json` 的 `defaults.openviking.root_api_key`。如果旧
+配置缺少该字段，`ov-mgn plan` / `server-config lock` 会自动生成并写回 `server.json`。
+lock、status 和 gateway 信息页不会保存或展示这个 token。
 
 `wizard add-service` 只添加普通服务。需要从已有服务派生数据和配置时，使用
 `ov-mgn branch SOURCE_SERVICE TARGET_SERVICE` 生成 `branch` 字段。

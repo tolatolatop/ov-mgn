@@ -20,6 +20,7 @@ from ov_mgn.lifecycle import down_service, promote_service, switch_service, up_s
 from ov_mgn.logging import configure_logging, get_logger
 from ov_mgn.server_config import (
     UserServerConfig,
+    ensure_user_server_root_api_key,
     get_release_lock_path,
     get_server_config_path,
     get_server_lock_path,
@@ -561,6 +562,7 @@ def lock_server_config(config_path: Path | None, lock_path: Path | None) -> None
 def _write_plan(config_path: Path | None, lock_path: Path | None) -> Path:
     logger.debug("write plan config_path=%s lock_path=%s", config_path, lock_path)
     config = load_user_server_config(config_path)
+    config = ensure_user_server_root_api_key(config, config_path)
     _validate_openviking_or_fail(config)
     source = config_path or get_server_config_path()
     locked = render_locked_config(config, source=source)

@@ -174,10 +174,7 @@ Git source 最小配置：
 | `vlm.api_base` | 常用配置 | 无 | VLM/LLM API base。 |
 | `vlm.api_key` | 常用配置、敏感字段 | 无 | VLM/LLM API key。 |
 | `vlm.model` | 常用配置 | 无 | VLM/LLM 模型名。 |
-| `bot` | 至少一个顶层段必须提供 | 无 | bot/agent 配置段。 |
-| `bot.agents` | 常用配置 | 无 | agent 使用的模型配置。常见字段与 `vlm` 类似。 |
-| `bot.agents.api_key` | 常用配置、敏感字段 | 无 | agent API key。 |
-| `bot.agents.model` | 常用配置 | 无 | agent 模型名。 |
+| `bot` | 不允许 | 无 | 已废弃。Vikingbot 配置改用 `vlm` 节。 |
 
 常用完整示例：
 
@@ -200,16 +197,6 @@ Git source 最小配置：
     "api_key": "replace-me",
     "model": "gpt-5.1-chat",
     "temperature": 0.7
-  },
-  "bot": {
-    "agents": {
-      "provider": "openai",
-      "api_base": "https://example.invalid/v1",
-      "api_key": "replace-me",
-      "model": "gpt-5.1-chat",
-      "max_tool_iterations": 50,
-      "memory_window": 50
-    }
   }
 }
 ```
@@ -220,8 +207,8 @@ Git source 最小配置：
 | --- | --- | --- |
 | 顶层 `server` | 不允许 | ov-mgn 会自动生成 `server.host`、`server.port`、`server.root_api_key`；`model.json` 里写 `server` 会校验失败。 |
 | 顶层 `storage` | 不允许 | ov-mgn 会自动生成 local storage 配置；`model.json` 里写 `storage` 会校验失败。 |
-| 顶层自定义段 | 不允许 | 顶层只能是 `embedding`、`vlm`、`bot`。 |
-| 段内扩展字段 | 高级配置 | ov-mgn 不限制 `embedding`、`vlm`、`bot` 内部字段；会原样交给 OpenViking。 |
+| 顶层自定义段 | 不允许 | 顶层只能是 `embedding`、`vlm`。 |
+| 段内扩展字段 | 高级配置 | ov-mgn 不限制 `embedding`、`vlm` 内部字段；会原样交给 OpenViking。 |
 | API key | 敏感字段 | 不会进入 `server.json.lock` 或 `status` 输出；会写入 release 目录下生成的 `openviking.conf`。确保 `model.json` 和 release 配置目录权限正确。 |
 | 向导占位 API key | 常用配置 | 如果交互输入 API key 时留空，写入 `replace-me`，用于提醒后续替换真实密钥。 |
 
@@ -240,12 +227,11 @@ Git source 最小配置：
     "agfs": {"backend": "local"}
   },
   "embedding": {},
-  "vlm": {},
-  "bot": {}
+  "vlm": {}
 }
 ```
 
-其中 `embedding`、`vlm`、`bot` 来自 `model.json`；`server` 和 `storage` 由 ov-mgn
+其中 `embedding`、`vlm` 来自 `model.json`；`server` 和 `storage` 由 ov-mgn
 生成，用户不要手写。
 
 ## 7. 受 ov-mgn 管理的配置

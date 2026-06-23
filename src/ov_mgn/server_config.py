@@ -27,7 +27,7 @@ OPENVIKING_MANAGED_ENV_KEYS = {
     "VIKINGBOT_API_KEY",
     "PATH",
 }
-OPENVIKING_MODEL_SECTIONS = {"embedding", "vlm", "bot"}
+OPENVIKING_MODEL_SECTIONS = {"embedding", "vlm"}
 SERVICE_NAME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 ENV_KEY_PATTERN = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 ROUTE_PATH_PATTERN = re.compile(r"^/[A-Za-z0-9_/-]*/$")

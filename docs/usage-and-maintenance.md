@@ -74,7 +74,7 @@ secret env；只有确认需要高级选项后，才会继续询问模型配置�
 
 ### 1.3 手动准备 model.json
 
-`~/.ov_mgn/model.json` 只允许 `embedding`、`vlm`、`bot` 顶层字段。真实 API key
+`~/.ov_mgn/model.json` 只允许 `embedding`、`vlm` 顶层字段。真实 API key
 只写在这里，不写入 `server.json`、lock 或 status 输出。
 
 ```bash
@@ -97,17 +97,8 @@ cat > ~/.ov_mgn/model.json <<'EOF'
     "api_key": "replace-me",
     "model": "gpt-5.1-chat",
     "temperature": 0.7
-  },
-  "bot": {
-    "agents": {
-      "provider": "openai",
-      "api_base": "https://example.invalid/v1",
-      "api_key": "replace-me",
-      "model": "gpt-5.1-chat",
-      "max_tool_iterations": 50,
-      "memory_window": 50
-    }
   }
+
 }
 EOF
 chmod 600 ~/.ov_mgn/model.json
